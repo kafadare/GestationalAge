@@ -1,0 +1,978 @@
+---
+title: "0313_0318"
+author: "Eren Kafadar"
+date: "2024-03-13"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+# Thoughts on this week
+
+
+Study must be added as random variable, but keep getting an error. Ask 
+
+From Meeting with Lena 03/06
+- add fetal data & encode as "term" born (look into where it comes from, and whether birth info is available) (but also they weren't born yet -- could argue that they were going to be born preterm and that could have been delineable in their brain before birth too)
+- add "study"/"site" as a random effect in the model
+- GA x age interaction term
+- SI of the original braincharts paper
+- ABCD, could be linear modeling with GA x age interaction effect and random effect of subject(longitudinal)
+
+LBCC-SLIP stuff.
+There are already "Slip" data inside the LBCC consortium.
+- look at these datapoints to see if they are ALL the scans, or else how are there >1700 data points there?
+- get data specifically from "earlier life" age ranges (look into specific studies for this)
+- Also, is the SLIP data in the lbcc file Lena sent Freesurfer segmentations??
+
+To fix inside functions
+- for output of predictCentiles: only one logAge column. Save the number of "centile" inside the list element too.
+- fix ageAtPeaks code so that it works with the the predictCentiles output.
+- Make plotting into a function on its own (inside the figures script!)
+
+Also Still Need To:
+-Read Ss paper!!
+-Look at fsleyes segmentations of VERY BAD segmentations (infants) with low autoQC scores
+
+IDEA:
+did this below, but only within SLIP 03/01 .. what were the results though?
+- run gamlss with GA, using chronological age -- for the LBCC-SLIP combined data, might need to get chronological age back from post-conception age...
+
+**BIG Q - currently logAge is from adjusted age. Should I use adjusted or non-adjusted when modeling for GA effect? Think about this.**
+
+***
+
+This is the script from Jenna's github that would be a helpful place to start to build gamlss models. There should also be Jakob's scripts that are more complicated but provide more flexibility (this is my understanding) in choosing a model.
+https://github.com/jmschabdach/mpr_analysis/blob/develop/r/build_your_own_growth_chart.R
+
+Notes on Jenna Code
+- FreeSurfer model includes SurfaceHoles variable in model, not applicable in SynthSeg output.
+- logAge: numeric type with log(post conception age in days, base=10). In (1), we use a conversion factor of 325.25 days/year and a post conception offset of 280 days if post conception age is not available.
+
+***
+This is the script from code Lena sent over for gamlss models & model selection
+
+
+***
+
+#Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(magrittr)
+library(table1)
+library(ggplot2)
+library(rlang)
+library(viridis)
+library(gridExtra)
+library(purrr)
+library(cowplot)
+library(gamlss) #to fit model
+library(mgcv) # helps with the gam models
+library(tidymv) # helps with the gam models
+
+#setwd("/Users/ekafadar/Documents/Grad_School/BGDLab/GestationalAge/")
+source("/Users/ekafadar/Documents/Grad_School/BGDLab/GestationalAge/R/scripts/data_functions.R")
+source("~/Documents/Grad_School/BGDLab/GestationalAge/R/scripts/lib_mpr_analysis_EK.r")
+source("~/Documents/Grad_School/BGDLab/GestationalAge/R/scripts/growth_chart_fcts_EK.r")
+source("~/Documents/Grad_School/BGDLab/GestationalAge/R/scripts/figures.r")
+source("~/Documents/Grad_School/BGDLab/GestationalAge/R/scripts/GAmodeling_draft.r")
+
+folders <- c("/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/2024-01-19_release/slip_2022/","/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/2024-01-19_release/slip_2023_02/", "/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/2024-01-19_release/slip_2023_03/")
+manual_qc_file <- "/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/manual_qc_grades_radiology_paper.csv"
+lbcc_ga_file <- "~/Documents/Grad_School/BGDLab/LBCC_data/GA.all.data-24-02.csv"
+```
+
+# Play - SLIP
+## Load Data
+Data Jenna sent is in 3 folders by release date
+There are 3 files in each folder
+- qc scores csv % synthseg volumes csv -- 2155 unique subject_ids, and 11267 unique data points (subject + age at scan?)
+- participants tsv -- 2173 total data
+
+Put all the data together from three releases and merge the qc scores, volumes, and participant data
+Save this full dataset
+###Load all csv data and merge
+```{r}
+participants <- load_data(names = c(paste0("data",1:3)), paste0(folders,"participants.tsv")) %>% bind_rows(.)
+qc_scores <- load_data(names = c(paste0("data",1:3)), paste0(folders,"synthseg+_qc_scores.csv")) %>% bind_rows(.)
+volumes <- load_data(names = c(paste0("data",1:3)), paste0(folders,"synthseg+_volumes.csv")) %>% bind_rows(.)
+colnames(qc_scores) <- c(paste0(names(qc_scores[1:8])),paste0(names(qc_scores[9:length(names(qc_scores))]),"_qc"))
+qc_manual <- load_data(names = "qc", manual_qc_file) %>% bind_rows(.)
+qc_manual$full_path <- qc_manual$scan_id
+qc_manual$scan_id <- gsub("(?:.*/){10}", "\\1", qc_manual$full_path) %>% sub("\\.nii\\.gz$", "", .)
+#merge
+full_data <- merge(qc_scores, volumes, by = intersect(names(qc_scores), names(volumes)))
+full_data <- merge(full_data, participants, by = intersect(names(full_data), names(participants)))
+write.csv(full_data, file = "/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/SLIP_combined_011923.csv", quote = F, row.names = F)
+```
+
+###Load full data
+adjust variables: log10 age, get minQC column
+2/12 Fix adjusted age. Original df was adding GA in weeks to age at scan in days.
+Now we are
+adding GA x 7 + age at scan
+if GA not available, then adding 280 + age at scan (for assuming a 40week term pregnancy) -- just so there is no NAs in the column, but in actuality we don't know if these scans were full-term or not.
+```{r}
+qc_manual <- load_data(names = "qc", manual_qc_file) %>% bind_rows(.)
+qc_manual$full_path <- qc_manual$scan_id
+qc_manual$scan_id <- gsub("(?:.*/){10}", "\\1", qc_manual$full_path) %>% sub("\\.nii\\.gz$", "", .)
+full_data <- read.csv("/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/SLIP_combined_011923.csv") 
+full_data <- full_data %>% mutate(sex = as.factor(sex)) %>% rowwise() %>% 
+  mutate(minQC = min(c_across(contains("qc"))))
+full_data$adjusted_age_in_days <- ifelse(!is.na(full_data$gestational_age), (full_data$age_at_scan + (full_data$gestational_age*7)), full_data$age_at_scan + 280)
+levels(full_data$sex) <- c("F", "M") #male = 0, female = 1
+full_data$logAge <- log10(full_data$adjusted_age_in_days)
+```
+
+###Split data by scan type, ageBin
+```{r}
+full_data$scan_type <- as.factor(ifelse(grepl("MPR", full_data$scan_id), "MPR", ifelse((!grepl("MPR", full_data$scan_id) & grepl("T1w", full_data$scan_id)), "T1w_other", ifelse(grepl("T2w", full_data$scan_id), "T2w", ifelse(grepl("FLAIR", full_data$scan_id), "flair", NA)))))
+full_data$ageBin <- cut(full_data$age_at_scan, breaks = c(-Inf, 30, 365, 1095, 2190, 4380, Inf), labels = c("Newborn", "Infant", "Toddler", "Preschool", "School_Age", "Adolescent"), include.lowest = TRUE)
+#df_MPR <- full_data[grepl("MPR", full_data$scan_id),] %>% distinct(subject_id, .keep_all = T)#947
+
+#df_T1w <- full_data[!grepl("MPR", full_data$scan_id) & grepl("T1w", full_data$scan_id),] %>% distinct(subject_id, .keep_all = T)#1743
+
+#df_T2w <- full_data[grepl("T2w", full_data$scan_id),] %>% distinct(subject_id, .keep_all = T)#1021
+
+#table(grepl("FLAIR",full_data$scan_id))#891
+table(full_data$scan_type)
+```
+1229 MPR scans, 947 unique subject ids
+6519 T1w non-MPR scans, 1743 unique subject ids
+2628 T2w scans, 1021 unique subject ids
+891 FLAIR scans
+-All 11267 scans accounted for above.
+
+###Separate df w/ GA
+Use scans with MPR. df_MPR
+!!! Noticed on 2/6/24 that the cut-offs were inclusive, so changed them to 31.9 and 36.9, this will change the #s of subjects for the categories down the line. So should re-run things!!
+```{r}
+all_GA_data <- subset(full_data, !is.na(gestational_age))#358
+GA_data <- subset(filter(full_data, scan_type == "MPR"), !is.na(gestational_age)) %>% distinct(subject_id, .keep_all = T)#358
+GA_data$log_GA <- log10(GA_data$gestational_age)
+#Split in GA bins
+# Determine the cut points based on quantiles
+cut_points <- quantile(GA_data$gestational_age, probs = c(1/3, 2/3)) # cut points are 39 and 40. So this will NOT work.
+
+cut_points <- quantile(GA_data$log_GA, probs = c(1/3, 2/3)) # cut points are 1.59 and 1.6. So this will NOT work.
+
+# Create a new column indicating cut points: specifying by weeks.
+GA_data$preterm <- cut(GA_data$gestational_age, breaks = c(-Inf, 31.9, 36.9, Inf), labels = c("VPM", "LPM", "Term"), include.lowest = TRUE)
+table(GA_data$preterm)
+table(GA_data$sex)
+table(all_GA_data$scan_type)
+```
+## QC Scores
+###General QC notes
+synthseg QC scores is like a predicted dice coef, based on trained models, only trained for some values.
+this QC might not be good enough, might have to go back and do some QC
+Synthseg is hierarchical, ie finds cortex and then finds regions between them
+**Confirm with Jakob, 0.65 across every single one (all should be above 0.65 within a sample) Might need to do some sensitivity analyses.**
+
+Expectation: A higher proportion of data would have GA if its for people under < 5, with only more recent scans
+Look at QC scores for variables which include QC scores:
+ * general WM
+ * general GM
+ * general CSF
+ * cerebellum
+ * brainstem
+ * thalamus
+ * putamen.pallidum
+ * hippocampus.amygdala
+ 
+###Values
+```{r}
+table(filter(full_data, minQC >= 0.65)$scan_type)
+table(filter(all_GA_data, minQC >= 0.65)$scan_type)
+
+table(filter(full_data, minQC >= 0.65)$scan_type)
+dim(full_data %>% filter(minQC >= 0.65) %>% distinct(subject_id))
+table(filter(all_GA_data, minQC >= 0.65)$scan_type)
+dim(all_GA_data %>% filter(minQC >= 0.65) %>% distinct(subject_id, .keep_all = T) %>% filter(scan_type == "MPR"))
+```
+
+###Manual QC and Auto QC similarity?
+SLIP paper used average QC >= 1.0
+Odds Ratio?
+For the full dataset
+```{r}
+df <- merge(full_data, qc_manual,by = c("scan_id")) 
+table(df$scan_type)
+plot(df$rawdata_image_grade, df$minQC, main = "all, n = 472")
+df_MPR <- df %>% filter(scan_type == "MPR")#273
+plot(df_MPR$rawdata_image_grade, df_MPR$minQC, main = "within MPR, n = 273")
+ggplot(df, aes(x=minQC, fill = as.factor(rawdata_image_grade))) + geom_histogram(bins = 20) + scale_x_continuous(breaks = pretty(df$minQC, n = 10)) + theme_minimal() + ggtitle("All data with QC, n = 472")
+ggplot(df_MPR, aes(x=minQC, fill = as.factor(rawdata_image_grade))) + geom_histogram(bins = 20) + scale_x_continuous(breaks = pretty(df$minQC, n = 10)) + theme_minimal() + ggtitle("MPR data with QC, n = 273")
+
+
+plot(df$rawdata_image_grade, df$age_at_scan_days, main =  "all, n = 472")
+ga_num <- sum(!is.na(df$gestational_age))
+plot(df$rawdata_image_grade, df$gestational_age, main =  paste0("all, n = ", ga_num))
+##
+#df_MPR <- df %>% filter(scan_type == "MPR")%>% distinct(subject_id.x, .keep_all = T)#273 of them
+plot(df_MPR$minQC, df_MPR$rawdata_image_grade)
+cor.test(df_MPR$minQC, df_MPR$rawdata_image_grade)
+cor.test(df$minQC, df$rawdata_image_grade)
+sum(df_MPR$rawdata_image_grade >= 1) #222/273 using manual
+sum(df_MPR$minQC >= 0.65)#191/273 using SS auto
+sum(df_MPR$minQC >= 0.60)#266/273 using SS auto
+
+#plot overlap, by scan type
+hist(df$minQC)
+ggplot(df, aes(x=minQC, fill = as.factor(rawdata_image_grade))) + geom_histogram(bins = 20) + scale_x_continuous(breaks = pretty(df$minQC, n = 10)) + theme_minimal() + ggtitle("All data with QC, n = 472") + facet_wrap(~scan_type, nrow = 2)
+
+#plot overlap, by age bin
+ggplot(df_MPR, aes(x=minQC, fill = as.factor(rawdata_image_grade))) + geom_histogram(bins = 20) + scale_x_continuous(breaks = pretty(df$minQC, n = 10)) + theme_minimal() + ggtitle("MPR data with QC, n = 273") + facet_wrap(~ageBin, nrow = 2)
+
+#plot overlap, by ageXscan
+ggplot(df, aes(x=minQC, fill = as.factor(rawdata_image_grade))) + geom_histogram(bins = 20) + scale_x_continuous(breaks = pretty(df$minQC, n = 10)) + theme_minimal() + ggtitle("All data with QC, n = 472") + facet_wrap(~ageBin+scan_type, nrow = 3)
+
+```
+For the GA data
+odds ratio of being high QC under SS when high QC under manual is 2.43 (with SS value at 0.65)
+2.35 with SS value at 0.6
+80/101 pass manual QC, 56/101 pass SS auto QC (at 0.65)
+```{r}
+df <- merge(GA_data, qc_manual,by = c("scan_id"))#66 obs, all MPR
+plot(df$minQC, df$rawdata_image_grade)
+cor.test(df$minQC, df$rawdata_image_grade)
+sum(df$rawdata_image_grade >= 1) #52/66 using manual
+sum(df$minQC >= 0.65)# 49/66 using SS auto
+
+#plot overlap
+hist(df$minQC)
+ggplot(df, aes(x=minQC, fill = as.factor(rawdata_image_grade))) + geom_histogram(bins = 20) + scale_x_continuous(breaks = pretty(df$minQC, n = 10)) + theme_minimal() + ggtitle("GA data with QC, n = 66")
+```
+ ***
+Logistic regression to predict manual QC value from SS auto QC
+- minQC IS a sig predictor ( p = 0.119, beta est = 4.5) of "pass" status in manual QC --- using only the MPR scans
+```{r}
+df_MPR <- full_data %>% group_by(scan_type) %>% distinct(subject_id, .keep_all = T) %>% filter(scan_type == "MPR")
+df <- merge(df_MPR, qc_manual,by = c("scan_id")) %>% mutate(manual_QC_pass = rawdata_image_grade >= 1)
+df$manual_QC_pass<- factor(df$manual_QC_pass)
+logit <- glm(manual_QC_pass ~ minQC, data = df, family = "binomial")
+summary(logit)
+```
+
+ ***
+Notes after impromptu meeting with Jenna on 01/31 on QC stuff
+GM/CSF/WM -- could just be sums? Is QC value an average of these sums? Doesn't seem likely given the distributions.
+There is specific QC ratings for the manual ratings in the respublika folder for the SLIP radiology paper. This could be useful to look at specific ratings of the images.
+The specific images used to rate are also in this folder I think
+
+ ***
+###Looking at Individual Scans
+Take a look at individual scans that have
+- borderline auto QC 0.6/0.65
+- mismatched auto & manual QC
+- mid-low auto QC 0.2-0.4
+Look at about ~2-3 scans from each category in fsl viewer on Respublika
+Screenshot them for google slides.
+Choosing the scans to be looked at:
+``` {r}
+borderline_autoQC <- filter(GA_data, minQC < 0.65 & minQC >= 0.55)
+df <- merge(GA_data, qc_manual,by = c("subject_id", "session_id"))
+mismatch_QC_mnPS <- filter(df, rawdata_image_grade >= 1 & minQC < 0.65)
+mismatch_QC_ssPS <- filter(df, rawdata_image_grade < 1 & minQC >= 0.65)
+midlow_autoQC <- filter(GA_data, minQC < 0.4 & minQC > 0.2)
+set.seed(42)
+s1 <- borderline_autoQC[sample(nrow(borderline_autoQC), 1, replace = FALSE), ]
+s2 <-mismatch_QC_mnPS[sample(nrow(mismatch_QC_mnPS), 1, replace = FALSE), ]
+s3 <-mismatch_QC_ssPS[sample(nrow(mismatch_QC_ssPS), 1, replace = FALSE), ]
+s4 <-midlow_autoQC[sample(nrow(midlow_autoQC), 1, replace = FALSE), ]
+full_data[which(full_data$minQC == max(full_data$minQC)),]
+full_data[which(full_data$minQC > 0.75 & full_data$adjusted_age_in_days < 1500),]
+s4
+```
+Max Min QC 0.7655
+slip 2023-03 sub-HM14RHXMW_ses-201050308439procId006006ageDays_acq-MPR_run-001_T1w $\checkmark$
+adj age 6286 days
+
+High QC 0.7531 age 1399 days
+slip 2022 sub-HM18OTNFZ_ses-325726739876procId001362ageDays_acq-TSE_run-001_T1w $\checkmark$
+
+Borderline
+slip 2023-03 sub-HM36EP5TB_ses-297207596745procId001242ageDays_acq-TSE_run-002_T1w $\checkmark$
+minQC 0.6318
+adj age 1281 days
+
+slip 2023-02 	sub-HM34S3Z1_ses-95046832730procId000534ageDays_run-001_T2w
+minQC 0.6445
+adj age 573 days
+
+slip 2023-02 	sub-HM1WCY4QA_ses-186586445493procId003011ageDays_run-002_FLAIR
+minQC 0.6284
+adj age 3051 days
+
+
+Midlow
+23-03
+age 1065days
+minQC 0.3952
+sub-HM1WEGOWD_ses-320995680774procId001027ageDays_run-003_T2w
+**^ !!! I can't figure out how to display T2 images on fsleyes properly ...**
+
+23-02
+age 5531days
+minQC 0.2553
+sub-HM25RQYI4_ses-222549305714procId005496ageDays_run-004_T2w
+
+23-02
+age 1406days
+minQC 0.3752
+sub-HM2VQDK5U_ses-61776394344procId001366ageDays_run-003_T1w
+
+
+##Looking at Individual Scans
+Look at scans for low Ss QC AND for low raw image grade manual rating.
+``` {r}
+borderline_autoQC <- filter(GA_data, minQC < 0.65 & minQC >= 0.55)
+df <- merge(GA_data, qc_manual,by = c("subject_id", "session_id"))
+mismatch_QC_mnPS <- filter(df, rawdata_image_grade >= 1 & minQC < 0.65)
+mismatch_QC_ssPS <- filter(df, rawdata_image_grade < 1 & minQC >= 0.65)
+midlow_autoQC <- filter(GA_data, minQC < 0.4 & minQC > 0.2)
+set.seed(42)
+s1 <- borderline_autoQC[sample(nrow(borderline_autoQC), 1, replace = FALSE), ]
+s2 <-mismatch_QC_mnPS[sample(nrow(mismatch_QC_mnPS), 1, replace = FALSE), ]
+s3 <-mismatch_QC_ssPS[sample(nrow(mismatch_QC_ssPS), 1, replace = FALSE), ]
+s4 <-midlow_autoQC[sample(nrow(midlow_autoQC), 1, replace = FALSE), ]
+full_data[which(full_data$minQC == max(full_data$minQC)),]
+full_data[which(full_data$minQC > 0.75 & full_data$adjusted_age_in_days < 1500),]
+s4
+``` 
+
+##Phenotypes ~ Scan
+Take the median of all scans within a type that pass QC. Plot that. Also plot across ages (I think). Plot the median across ages too?
+Also plot growth charts based on them?
+Phenotypes to use:
+WM
+CSF
+GM - Q: is it for cortical or subcortical?
+###Medians by scan type
+boxplot with notch, notches extend to  1.58 * IQR / sqrt(n), roughly 95% CI to compare medians
+```{r}
+df <- full_data %>% filter(minQC >= 0.65)
+
+#group_median(df, scan_type, TCV) #!! This fct currently not working sadly... Might circle back & fix it later.
+
+TCV <- ggplot(df, aes(x = scan_type, y = TCV)) +
+    geom_boxplot(coef = 0, notch = TRUE, outlier.shape = NA,aes(fill = scan_type)) + theme(axis.title.x = element_blank(), legend.position = "none")+  scale_y_continuous(limits = quantile(df$TCV, c(0.25, 0.75)))
+
+Cortex <- ggplot(df, aes(x = scan_type, y = Cortex)) +
+    geom_boxplot(coef = 0, notch = TRUE, outlier.shape = NA,aes(fill = scan_type)) + theme(axis.title.x = element_blank(), legend.position = "none")+
+  scale_y_continuous(limits = quantile(df$Cortex, c(0.25, 0.75)))
+
+WMV <- ggplot(df, aes(x = scan_type, y = WMV)) +
+    geom_boxplot(coef = 0, notch = TRUE, outlier.shape = NA,aes(fill = scan_type)) + theme(axis.title.x = element_blank(), legend.position = "none")+
+  scale_y_continuous(limits = quantile(df$WMV, c(0.25, 0.75)))
+
+sGMV <- ggplot(df, aes(x = scan_type, y = sGMV)) +
+    geom_boxplot(coef = 0, notch = TRUE, outlier.shape = NA,aes(fill = scan_type)) + theme(axis.title.x = element_blank(), legend.position = "none")+
+  scale_y_continuous(limits = quantile(df$sGMV, c(0.25, 0.75)))
+
+CSF <- ggplot(df, aes(x = scan_type, y = csf)) +
+    geom_boxplot(coef = 0, notch = TRUE, outlier.shape = NA,aes(fill = scan_type)) + theme(axis.title.x = element_blank(), legend.position = "none")+
+  scale_y_continuous(limits = quantile(df$csf, c(0.25, 0.75)))
+
+Ventricles <- ggplot(df, aes(x = scan_type, y = Ventricles)) +
+    geom_boxplot(coef = 0, notch = TRUE, outlier.shape = NA,aes(fill = scan_type)) + theme(axis.title.x = element_blank(), legend.position = "none")+
+  scale_y_continuous(limits = quantile(df$Ventricles, c(0.25, 0.75)))
+
+Cerebellum <- ggplot(df, aes(x = scan_type, y = CerebellumVolume)) +
+    geom_boxplot(coef = 0, notch = TRUE, outlier.shape = NA,aes(fill = scan_type)) + theme(axis.title.x = element_blank(), legend.position = "none")+ labs(y =  "Cerebellum") + scale_y_continuous(limits = quantile(df$CerebellumVolume, c(0.25, 0.75)))
+
+Thalamus <- ggplot(df, aes(x = scan_type, y = right.thalamus+left.thalamus)) +
+    geom_boxplot(coef = 0, notch = TRUE, outlier.shape = NA,aes(fill = scan_type)) + theme(axis.title.x = element_blank(), legend.position = "none")+ labs(y =  "Thalami") + scale_y_continuous(limits = quantile((df$right.thalamus + df$left.thalamus), c(0.25, 0.75)))
+
+Hippocampus <- ggplot(df, aes(x = scan_type, y = right.hippocampus+left.hippocampus)) +
+    geom_boxplot(coef = 0, notch = TRUE, outlier.shape = NA,aes(fill = scan_type)) + theme(axis.title.x = element_blank(), legend.position = "none")+ labs(y =  "Hippocampi")+ scale_y_continuous(limits = quantile((df$right.hippocampus + df$left.hippocampus), c(0.25, 0.75)))
+
+Amygdala <- ggplot(df, aes(x = scan_type, y = right.amygdala+left.amygdala)) +
+    geom_boxplot(coef = 0, notch = TRUE, outlier.shape = NA,aes(fill = scan_type)) + theme(axis.title.x = element_blank(), legend.position = "none")+ labs(y =  "Amygdalae") + scale_y_continuous(limits = quantile((df$right.amygdala + df$left.amygdala), c(0.25, 0.75)))
+
+Putamen <- ggplot(df, aes(x = scan_type, y = right.putamen+left.putamen)) +
+    geom_boxplot(coef = 0, notch = TRUE, outlier.shape = NA,aes(fill = scan_type)) + theme(axis.title.x = element_blank(), legend.position = "none")+ labs(y = "Putamina") + scale_y_continuous(limits = quantile((df$right.putamen + df$left.putamen), c(0.25, 0.75)))
+
+
+grid.arrange(TCV, Cortex, sGMV, WMV, CSF, Ventricles, Cerebellum, Thalamus, ncol = 2)
+```
+###Growth, just plots
+
+```{r}
+df <- full_data %>% filter(minQC > 0.65)
+
+# List of variables to plot
+vars_to_plot <- exprs(TCV, Cortex, WMV, sGMV, csf, Ventricles, CerebellumVolume, right.thalamus+left.thalamus, right.hippocampus+left.hippocampus, right.amygdala+left.amygdala,right.putamen+left.putamen)
+
+# Create plots for each variable
+plots <- lapply(vars_to_plot, function(var) {
+  group_smooth(df, scan_type, !!var, age_at_scan)
+})
+
+# Assume plots is a list of ggplot plots
+grid.arrange(grobs = plots[1:4], ncol = 2)
+grid.arrange(grobs = plots[5:8], ncol = 2)
+grid.arrange(grobs = plots[9:11], ncol = 2)
+
+```
+###Medians within subject(session)
+For the median thing, I meant taking the median within subject of all of the scan types, and using that median value as the thing to growth chart.
+For all that have passed QC > 0.65
+Would be particularly interested in how the median of “all scan types” compares to “all scan type except for MPR” and how these compare to "just the MPR".
+```{r}
+#vars for the median dataframe
+vars <- c("TCV", "Cortex", "WMV", "sGMV", "csf", "Ventricles", "CerebellumVolume")
+
+# Calculate median values for each session across all scans
+median_df_all <- full_data %>% filter(minQC >= 0.65) %>% group_by(session_id) %>% summarise(across(all_of(vars), median)) %>% merge(.,select(full_data, c("subject_id", "sex", "age_at_scan", "adjusted_age_in_days", "gestational_age", "session_id", "logAge")), by = "session_id", all.x = TRUE) %>% distinct(subject_id, .keep_all = T)
+
+# Calculate median values for each session across only MPRs
+median_df_MPR <- full_data %>% filter(minQC >= 0.65 & scan_type == "MPR") %>% group_by(session_id) %>% summarise(across(all_of(vars), median)) %>% merge(.,select(full_data, c("subject_id", "sex", "age_at_scan", "adjusted_age_in_days", "gestational_age", "session_id","logAge")), by = "session_id", all.x = TRUE) %>% distinct(subject_id, .keep_all = T)
+
+# Calculate median values for each session across only non-MPRs
+median_df_nonMPR <- full_data %>% filter(minQC >= 0.65  & scan_type != "MPR") %>% group_by(session_id) %>% summarise(across(all_of(vars), median)) %>% merge(.,select(full_data, c("subject_id", "sex", "age_at_scan", "adjusted_age_in_days", "gestational_age", "session_id", "logAge")), by = "session_id", all.x = TRUE) %>% distinct(subject_id, .keep_all = T)
+```
+###Growth charts from medians within subject(session)
+For participants who have MPR and non-MPR scans, get the df (median within subject), and auto-correlate
+-Raw
+Auto-correlate raw scores
+683 unique subject IDs
+687 unique session IDs
+```{r}
+vars <- c("TCV", "Cortex", "WMV", "sGMV", "csf", "Ventricles", "CerebellumVolume", "age_at_scan")
+id_vars <- c("session_id", "subject_id", "age_at_scan", "adjusted_age_in_days", "gestational_age","study_id","sex","race", "ethnicity", "ageBin", "site", "logAge")
+num_names <- names(select_if(full_data, is.numeric))
+ids_mpr <- unique(full_data[which(full_data$scan_type == "MPR"), "subject_id"])
+full_data$MPR <- (full_data$scan_type == "MPR")
+
+# # Get wide data format - by scan type median for scan type
+# wide_data <- full_data %>% subset(subject_id %in% ids_mpr$subject_id) %>% pivot_wider(id_cols = all_of(id_vars), names_from = scan_type, values_from = setdiff(num_names,id_vars), values_fill = NA, values_fn = median)
+
+# Get wide data format - by MPR vs non-MPR medians
+wide_data <- full_data %>% subset(subject_id %in% ids_mpr$subject_id) %>% pivot_wider(id_cols = all_of(id_vars), names_from = MPR, values_from = setdiff(num_names,id_vars), values_fill = NA, values_fn = median) %>% filter(minQC_FALSE >= 0.65) %>% filter(minQC_TRUE >= 0.65) %>% arrange(logAge)#317 with minQC
+
+plot(wide_data$TCV_TRUE, wide_data$TCV_FALSE, xlab = "MPR", ylab = "nonMPR", main = "TCV, n = 317")
+plot(wide_data$Cortex_TRUE, wide_data$Cortex_FALSE, xlab = "MPR", ylab = "nonMPR", main = "Cortex, n = 317")
+plot(wide_data$CerebellumVolume_TRUE, wide_data$CerebellumVolume_FALSE, xlab = "MPR", ylab = "nonMPR", main = "Cerebellum Volume, n = 317")
+plot(wide_data$WMV_TRUE, wide_data$WMV_FALSE, xlab = "MPR", ylab = "nonMPR", main = "WMV, n = 317")
+plot(wide_data$sGMV_TRUE, wide_data$sGMV_FALSE, xlab = "MPR", ylab = "nonMPR", main = "sGMV, n = 317")
+plot(wide_data$csf_TRUE, wide_data$csf_FALSE, xlab = "MPR", ylab = "nonMPR", main = "CSF, n = 317")
+plot(wide_data$Ventricles_TRUE, wide_data$Ventricles_FALSE, xlab = "MPR", ylab = "nonMPR", main = "Ventricles, n = 317")
+
+cor.test(wide_data$TCV_TRUE, wide_data$TCV_FALSE)
+cor.test(wide_data$Cortex_TRUE, wide_data$Cortex_FALSE)
+cor.test(wide_data$CerebellumVolume_TRUE, wide_data$CerebellumVolume_FALSE)
+cor.test(wide_data$WMV_TRUE, wide_data$WMV_FALSE)
+cor.test(wide_data$sGMV_TRUE, wide_data$sGMV_FALSE)
+cor.test(wide_data$csf_TRUE, wide_data$csf_FALSE)
+cor.test(wide_data$Ventricles_TRUE, wide_data$Ventricles_FALSE)
+```
+
+
+Models & Centile Scores!
+For participants who have MPR and non-MPR scans, get the df (median within subject), and auto-correlate
+-Raw
+More important
+-Centile scores! (how do we get centile score auto-correlation?). Like centile scores of individuals? I am not sure I know exactly how to get that? Look into this 2/23 Friday!
+calculate phenotype centile function!!!
+```{r}
+vars <- c("TCV", "Cortex", "WMV", "sGMV", "csf", "Ventricles", "CerebellumVolume")
+id_vars <- c("session_id", "subject_id", "age_at_scan", "adjusted_age_in_days", "gestational_age","study_id","sex","race", "ethnicity", "ageBin", "site", "logAge")
+num_names <- names(select_if(full_data, is.numeric))
+ids_mpr <- unique(full_data[which(full_data$scan_type == "MPR"), "subject_id"])
+full_data$MPR <- (full_data$scan_type == "MPR")
+# Get wide data format - by MPR vs non-MPR medians
+wide_data <- full_data %>% subset(subject_id %in% ids_mpr$subject_id) %>% pivot_wider(id_cols = all_of(id_vars), names_from = MPR, values_from = setdiff(num_names,id_vars), values_fill = NA, values_fn = median) %>% filter(minQC_FALSE >= 0.65) %>% filter(minQC_TRUE >= 0.65) %>% arrange(logAge)#317 with minQC
+
+#growth charts modeling and centile prediction
+gc_MPR <- lapply(paste0(vars,"_TRUE"), function(x) {growthchart_model(x, df = wide_data)}) %>% set_names(vars)
+gc_nonMPR <- lapply(paste0(vars,"_FALSE"), function(x) {growthchart_model(x, df = wide_data)}) %>% set_names(vars)
+
+#get centile values for phenotypes
+centiles_MPR <- lapply(seq_along(vars), function(i) {calculatePhenotypeCentile(gc_MPR[[i]]$model, get(paste0(vars[i],"_TRUE"), wide_data), wide_data$logAge, wide_data$sex, df = wide_data)})
+centiles_nonMPR <- lapply(seq_along(vars), function(i) {calculatePhenotypeCentile(gc_MPR[[i]]$model, get(paste0(vars[i],"_FALSE"), wide_data), wide_data$logAge, wide_data$sex, df = wide_data)})
+plots <- lapply(seq_along(vars), function(i){ ggplot() + geom_point(aes(x = centiles_MPR[[i]], y =centiles_nonMPR[[i]])) + labs( x = "MPR", y = "non-MPR", title = paste0("Centile Scores,", vars[i],", n=317")) + theme_minimal()})
+# Assume plots is a list of ggplot plots
+grid.arrange(grobs = plots[1:4], ncol = 2)
+grid.arrange(grobs = plots[5:7], ncol = 2)
+
+#Get correlations of centile scores
+
+
+
+cor.test(gc_MPR[[1]]$centileCurves$`0.5`$median, gc_nonMPR[[1]]$centileCurves$`0.5`$median)
+cor.test(gc_MPR[[2]]$centileCurves$`0.5`$median, gc_nonMPR[[2]]$centileCurves$`0.5`$median)
+cor.test(gc_MPR[[3]]$centileCurves$`0.5`$median, gc_nonMPR[[3]]$centileCurves$`0.5`$median)
+cor.test(gc_MPR[[4]]$centileCurves$`0.5`$median, gc_nonMPR[[4]]$centileCurves$`0.5`$median)
+cor.test(gc_MPR[[5]]$centileCurves$`0.5`$median, gc_nonMPR[[5]]$centileCurves$`0.5`$median)
+cor.test(gc_MPR[[6]]$centileCurves$`0.5`$median, gc_nonMPR[[6]]$centileCurves$`0.5`$median)
+cor.test(gc_MPR[[7]]$centileCurves$`0.5`$median, gc_nonMPR[[7]]$centileCurves$`0.5`$median)
+
+
+
+```
+ **Should make this stuff into a function**
+Plotting! -- Make this into standalone figure function that can be repeated!
+```{r}
+# Set up a list of tick marks to use on log(post-conception age) x-axes
+tickMarks <- c()
+for (year in c(0, 1, 2, 5, 10, 20)){ # years
+  tickMarks <- append(tickMarks, log(year*365.25 + 280, base=10)) #currently has the standard 280 adjustment, but is this reasonable? Perhaps for the scale yes.
+}
+tickLabels <- c("Birth", "1", "2", "5", "10", "20")
+
+
+# Plot the original data and the set of centile curves on a figure
+plotSs <- ggplot() +
+  #geom_point(aes(x=dfSsterm$logAge, dfSsterm[, p]), alpha=0.5) +
+  geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[1]]$median), alpha=0.4) +
+  geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[2]]$median), alpha=0.6) +
+  geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[3]]$median), alpha=0.8) +
+  geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[4]]$median)) +
+  geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[5]]$median), alpha=0.8) +
+  geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[6]]$median), alpha=0.6) +
+  geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[7]]$median), alpha=0.4) +
+  scale_x_continuous(breaks=tickMarks, labels=tickLabels, 
+                     limits=c(tickMarks[[1]], max(centileCurvesSs[[1]]$logAge))) +
+  labs(title=paste0("Sample Growth Chart for ", p)) + 
+  xlab("Age at scan (log(years))") +
+  ylab(paste0(p, " Centile")) + 
+  theme(axis.line = element_line(colour = "black"),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        text = element_text(size = 18))
+
+print(plotSs)
+
+# Plot the original data and the set of centile curves on a figure
+plotSs_sex <- ggplot() +
+  #geom_point(aes(x=dfSsterm$logAge, dfSsterm[, p]), alpha=0.5) +
+  ##male curves
+  #geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[1]]$male), alpha=0.4, color = "blue") +
+  geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[2]]$male), alpha=0.6, color = "blue") +
+  #geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[3]]$male), alpha=0.8, color = "blue") +
+  geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[4]]$male), color = "blue") +
+  #geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[5]]$male), alpha=0.8, color = "blue") +
+  geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[6]]$male), alpha=0.6, color = "blue") +
+  #geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[7]]$male), alpha=0.4, color = "blue") +
+  ##female curves
+  #geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[1]]$female), alpha=0.4, color = "red") +
+  geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[2]]$female), alpha=0.6, color = "red") +
+ #geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[3]]$female), alpha=0.8, color = "red") +
+  geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[4]]$female), color = "red") +
+ #geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[5]]$female), alpha=0.8, color = "red") +
+  geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[6]]$female), alpha=0.6, color = "red") +
+ #geom_line(aes(x=centileCurvesSs[[1]]$logAge, y=centileCurvesSs[[7]]$female), alpha=0.4, color = "red") +
+  scale_x_continuous(breaks=tickMarks, labels=tickLabels, 
+                     limits=c(tickMarks[[1]], max(centileCurvesSs[[1]]$logAge))) +
+  labs(title=paste0("Sample Growth Chart for ", p, "By Sex")) + 
+  xlab("Age at scan (log(years))") +
+  ylab(paste0(p, " Centile")) + 
+  theme(axis.line = element_line(colour = "black"),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        text = element_text(size = 18))
+
+print(plotSs_sex)
+```
+##Get GAdata frames QCd
+ 2/12 
+ - Will use MPR scans with minQC >= 0.6 Ss ! Use this for the merging with LBCC. #336 obs
+ - Also >= 1 for rawdata image grade #51 obs
+ 2/13
+ - After mtg with Aaron, decided to use >= 0.65 for now. Will re-assess especially after reading the Ss paper.
+**Save these dfs for future access. For both QC types.**
+```{r}
+df_Ss <- GA_data %>% group_by(scan_type) %>% distinct(subject_id, .keep_all = T) %>% filter(scan_type == "MPR"& minQC >= 0.65)
+df_mnSs <- merge(GA_data, qc_manual,by = c("subject_id", "session_id")) %>% group_by(scan_type) %>% distinct(subject_id, .keep_all = T) %>% filter(scan_type == "MPR" & rawdata_image_grade >= 1 & minQC >= 0.65)
+table(df_Ss$preterm)
+table(df_mnSs$preterm)
+write.csv(df_Ss, file = "/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/SLIP_GA_SsQC_65.csv", quote = F, row.names = F)
+write.csv(df_mnSs, file = "/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/SLIP_GA_mnSsQC_65.csv", quote = F, row.names = F)
+```
+ ***
+## Growth Charts
+Here I will fit a growth chart curve for the bins of data with GA.
+Going off of Jenna's code.
+
+Get GA data that passes QC standards
+sex as factor
+logAge, base 10 (post-conception offset of 280 days if post-conception age not available)
+Also geom_point layer cannot be computed. Keeps giving error: 
+Error in `geom_point()`:
+! Problem while computing aesthetics.
+ℹ Error occurred in the 1st layer.
+Caused by error in `new_tibble()`:
+! `names` must not be `NULL`.
+
+###Running the Model
+```{r}
+# df <- read.csv("/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/SLIP_GA_SsQC_65.csv") %>% arrange(logAge) %>% rename(GAbins_recode = preterm) %>% arrange(logAge)
+df <- read.csv("/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/SLIP_GA_SsQC_65.csv") %>% arrange(logAge) %>% rename(GAbins_recode = preterm) %>% mutate(logAge_unadj = log10(age_at_scan)) %>% arrange(logAge_unadj)
+vars <- c("TCV","Cortex","sGMV", "WMV", "Ventricles")
+# Build the growth chart model
+#Get the correct df
+gc_all <- lapply(vars, function(x) {growthchart_model(p = x, df = df)}) %>% set_names(vars)
+gc_allGA <- lapply(vars, function(x) {growthchart_modelGA(p = x, df = df, agevar = "logAge_unadj", covs = c("sex", "GAbins_recode"), formula = "~fp(logAge, npoly=3) + sex + GAbins_recode - 1")}) %>% set_names(vars)
+```
+###Plotting the Curves
+for term-born >37wks without any change to the model
+only using logAge and sex.
+```{r}
+vars <- c("TCV","Cortex","sGMV", "WMV", "Ventricles")
+
+plots <- lapply(seq_along(vars), function(i){growthChart_plot(p = vars[i], df = df, centileCurves = gc_all[[i]]$centileCurves, title = "")})
+grid.arrange(grobs = plots[1:2], ncol = 2)
+
+plotsGA <- lapply(seq_along(vars), function(i){growthChart_plot(p = vars[i], df = df, centileCurves = gc_allGA[[i]]$centileCurves, title = "", by.preterm = TRUE)})
+grid.arrange(grobs = plotsGA[1:4], ncol = 2)
+plotsGA[[1]]
+plotsGA[[2]]
+plotsGA[[3]]
+plotsGA[[4]]
+plotsGA[[5]]
+
+##plot GA curves with chronological (unadjusted) age
+    tickMarks <- c()
+    for (year in c(0.1, 1, 2, 5, 10, 20)){ # years
+      tickMarks <- append(tickMarks, log(year*365.25, base=10)) #currently has the standard 280 adjustment, but is this reasonable? Perhaps for the scale yes.
+    }
+    tickLabels <- c("Birth", "1", "2", "5", "10", "20")
+
+df <- df %>% rename(logAge_adj = logAge, logAge = logAge_unadj)
+vars <- c("TCV","Cortex","sGMV", "WMV", "Ventricles")
+
+plotsGA <- lapply(seq_along(vars), function(i){growthChart_plot(p = vars[i], df = df, centileCurves = gc_allGA[[i]]$centileCurves, title = "", by.preterm = TRUE, tickMarks = tickMarks, tickLabels = tickLabels)})   
+
+plotsGA[[1]]
+plotsGA[[2]]
+plotsGA[[3]]
+plotsGA[[4]]
+plotsGA[[5]]
+  
+```
+#Play - LBCC
+Got LBCC data from Lena
+dHCP fetal
+dHCP neonatal (25-40wk) 25% premature, many with term equivalent scan
+CHILD fetal + neonatal (30-35wk fetal, no gestational age at birth info)
+Harvard fetal (gestational age at scan 19-38)
+BCP (adjusted age, all term born)
+PING (30-43wk) 3-21 age
+Conte (27-42wk) 6 timepoints
+NIH (30-43wk) 5-25 age
+PNC (~250 have GA/BW, 25-42wk) 8-21 age
+TEBC (22-42wk) neonates
+ABCD (10k)
+FinnBrain
+UKB (1200k)
+SLIP
+
+sum of NAs in LBCC for these vars (removing SLIP) total N = 17286
+total_GM - 4157*
+total_WM - 15460
+CSF - 1538*
+ventricles - 4027*
+total_GMWM - 16831
+cort_GM - 13924
+cort_WM - 15226
+subc_GM - 2808*
+subc_WM - 15473
+brainMaskVol - 1660
+birth_height - 16795
+birth_weight - 14705
+birth_headcircumference - 17254
+height_at_scan - 16066
+weight_at_scan - 16063
+
+##Load Data
+! File saved at the end is not filtered out for only "unique" IDs ie one scan per participant.
+```{r}
+lbcc <- load_data(names = "lbcc", lbcc_ga_file) %>% bind_rows(.) %>%  select(-1, -2) #drop first two columns, repeat of row numbers
+length(unique(lbcc$participant))#15779 unique participant IDs
+```
+No of NAs in 
+PCW at birth - 603
+PCW at birth recoded - 338
+GA bins - 308
+```{r}
+#fix some columns in lbcc
+lbcc <- lbcc %>% rename(hippocampi_and_amygdalae = hippocampi_and_amygdale) %>% mutate(PC_days_at_scan = PCW_at_scan*7, PCW_at_birth_recoded = as.numeric(PCW_at_birth_recoded)) %>% mutate(logAge = log10(PC_days_at_scan)) #NA by coercion are ones that are encoded as "fetal" under PCW_at_birth_recoded
+lbcc$sex <- as.factor(lbcc$sex)
+levels(lbcc$sex) <- c("F", "F", "M", "M")
+lbcc$study_site <- as.factor(paste(lbcc$study, lbcc$site, sep = "_"))
+lbcc$study_recode <- as.factor(lbcc$study)
+#fix column names to match lbcc dataframe
+slip_GASsQc <- read.csv("/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/SLIP_GA_SsQC_65.csv")
+slip_GASsQc <- slip_GASsQc %>% mutate(total_GM = Cortex + sGMV, thalamus = right.thalamus + left.thalamus, hippocampus = right.hippocampus+left.hippocampus, putamen = right.putamen + left.putamen, hippocampi_and_amygdalae = right.hippocampus + left.hippocampus + right.amygdala + left.amygdala) %>% 
+  rename(participant = subject_id, PCW_at_birth_recoded = gestational_age, study = study_id, CSF = csf, total_WM = WMV, ventricles = Ventricles, brainMaskVol = TCV, cort_GM = Cortex, subc_GM = sGMV, cerebellum = CerebellumVolume, GAbins = preterm, PC_days_at_scan = adjusted_age_in_days, birth_weight = birth_weight_kg, birth_height = birth_length_cm)
+slip_GASsQc$study_recode <- as.factor(rep("SLIP", length(slip_GASsQc$study)))
+slip_GASsQc$study_site <- as.factor(rep("SLIP", length(slip_GASsQc$study)))
+```
+
+Combine lbcc and slip dataframes
+```{r}
+#bind dfs
+lbcc <- lbcc %>% filter(study != "SLIP")#17286
+lbcc_slip <- bind_rows(lbcc, slip_GASsQc) %>% arrange(logAge)#17546
+write.csv(lbcc_slip, file = "/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/lbcc_slip_GA_combo.csv", quote = F, row.names = F)
+```
+
+
+Duplicate IDs problem
+```{r}
+test_lbcc <- lbcc[duplicated(lbcc$participant),] #2381
+table(test_lbcc$study)
+test_lbcc$IDStudy <- paste0(test_lbcc$participant, test_lbcc$study)
+sum(duplicated(test_lbcc$IDStudy))
+test <- lbcc_slip[duplicated(lbcc_slip$participant),] #2381
+table(test$study) #lots of slip rows in the "duplicated IDs" table
+test_slip <- slip_GASsQc[duplicated(slip_GASsQc$participant),] #no duplicated within the slip dataset
+test <- lbcc_slip[duplicated(lbcc_slip$subject_study),] #2380
+table(test$study)
+```
+
+##Inspect Data Distribution
+~10K from ABCD (over 50% of data points)
+Harvard fetal and dHCP data - aren't born yet lol.
+DCHS study might not be appropriate, it is a dataset of southafrican moms & babies. Delete it!
+CONTE & CHILD & TEBC do not have regional info (but might have for subcortical volumes)
+!!Add the SLIP scans to this dataset.
+```{r}
+table(lbcc$study)
+sum(!is.na(lbcc$PCW_at_birth)) #16683
+sum(!is.na(lbcc$PCW_at_birth_recoded))#16683
+range(na.omit(lbcc$PCW_at_birth))#[2 50]
+boxplot(lbcc$PCW_at_birth)
+boxplot(lbcc$PCW_at_scan)
+hist(lbcc$PCW_at_scan)
+
+#Preterm categories (broad)
+# Create a new column indicating cut points: specifying by weeks.
+lbcc$preterm <- cut(lbcc$PCW_at_birth, breaks = c(-Inf, 31.9, 36.9, Inf), labels = c("VPM", "LPM", "Term"), include.lowest = TRUE)
+table(lbcc$preterm)
+table(lbcc[match(unique(lbcc$participant), lbcc$participant),"preterm"])
+table(lbcc[match(unique(lbcc_slip$participant), lbcc$participant),"GAbins"])
+```
+
+For lbcc-slip combo
+!! idk why recoding the factor level names is not working :(
+```{r}
+table(lbcc_slip$study)
+table(subset(lbcc_slip, !is.na(PCW_at_birth_recoded))$study)
+sum(!is.na(lbcc_slip$PCW_at_birth)) #18392
+sum(!is.na(lbcc_slip$PCW_at_birth_recoded)) #18652
+sum(!is.na(lbcc_slip$PC_days_at_scan)) #19255
+range(na.omit(lbcc_slip$PCW_at_birth))#[2 50]
+range(na.omit(lbcc_slip$PCW_at_birth_recoded))#[2 50]
+boxplot(lbcc_slip$PCW_at_birth_recoded, ylab = "PCW at birth")
+boxplot(lbcc_slip$PC_days_at_scan, ylab = "PC Days at scan")
+hist(lbcc_slip$PCW_at_birth)
+hist(lbcc_slip$PC_days_at_scan)
+```
+##Combined Data Load (pre-saved)
+```{r}
+#Preterm categories (broad)
+# Create a new column indicating cut points: specifying by weeks.
+lbcc_slip <- read.csv("/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/lbcc_slip_GA_combo.csv")
+lbcc_slip$preterm <- cut(lbcc_slip$PCW_at_birth_recoded, breaks = c(-Inf, 31.9, 36.9, Inf), labels = c("VPM", "LPM", "Term"), include.lowest = TRUE)
+lbcc_slip$GAbins_recode <- as.character(lbcc_slip$preterm)
+lbcc_slip$GAbins_recode[lbcc_slip$GAbins == "fetal"] <- "fetal"
+lbcc_slip$GAbins_recode <- as.factor(lbcc_slip$GAbins_recode)
+lbcc_slip$sex <- as.factor(lbcc_slip$sex)
+table(lbcc_slip$GAbins_recode)
+lbcc_slip$subject_study <- as.factor(paste0(lbcc_slip$participant, lbcc_slip$study))
+lbcc_slip$study_recode <- as.factor(lbcc_slip$study_recode)
+lbcc_slip$study <- as.factor(lbcc_slip$study)
+lbcc_slip$study_site <- as.factor(lbcc_slip$study_site)
+table(lbcc_slip[match(unique(lbcc_slip$participant), lbcc_slip$participant),"preterm"])
+table(lbcc_slip[match(unique(lbcc_slip$participant), lbcc_slip$participant),"GAbins_recode"])
+
+```
+##Plotting the raw data
+###All data
+```{r}
+# List of variables to plot
+vars_to_plot <- exprs(total_GM, CSF, ventricles, subc_GM, brainMaskVol, cerebellum, thalamus, weight_at_scan)
+df <- lbcc_slip[match(unique(lbcc_slip$participant), lbcc_slip$participant),] %>% filter(!is.na(GAbins_recode) & (PC_days_at_scan/365) <= 25 & GAbins_recode != "fetal")
+# Create plots for each variable
+plots <- lapply(vars_to_plot, function(var) {
+  group_smooth(df, GAbins_recode, !!var, log10(PC_days_at_scan))
+})
+
+# Assume plots is a list of ggplot plots
+grid.arrange(grobs = plots[1:4], ncol = 2)
+grid.arrange(grobs = plots[5:8], ncol = 2)
+
+hist(df$PC_days_at_scan)
+```
+###Age Constrained
+```{r}
+# List of variables to plot
+vars_to_plot <- exprs(total_GM, CSF, ventricles, subc_GM, brainMaskVol, cerebellum, thalamus, weight_at_scan)
+df <- lbcc_slip %>% filter(!is.na(GAbins_recode) & (PC_days_at_scan/365) <= 2 & GAbins_recode != "fetal") %>% distinct(participant, .keep_all = T)
+test <- lbcc_slip %>% filter(!is.na(GAbins_recode) & GAbins_recode != "fetal") %>% distinct(participant, .keep_all = T)
+# Create plots for each variable
+plots <- lapply(vars_to_plot, function(var) {
+  group_smooth(df, GAbins_recode, !!var, log10(PC_days_at_scan))
+})
+
+# Assume plots is a list of ggplot plots
+grid.arrange(grobs = plots[1:4], ncol = 2) 
+grid.arrange(grobs = plots[5:8], ncol = 2)
+```
+
+##GAMLSS
+
+
+###Models v1 - no study fx, no interaction, no fetal; global tissue-level phenotypes
+Age at peaks calculation needs to be adjusted for the new output of the centileCurves!
+Regular Model
+```{r}
+vars <- c("total_GM", "subc_GM", "total_WM", "ventricles")
+# Build the growth chart model
+#Get the correct df
+df <- lbcc_slip[match(unique(lbcc_slip$subject_study), lbcc_slip$subject_study),] %>% filter(!is.na(GAbins_recode) & GAbins_recode != "fetal") %>% arrange(logAge)#1707
+#hist(df$PC_days_at_scan, breaks = 200)
+
+gc_all <- lapply(vars, function(x) {growthchart_model(p = x, df = df)}) %>% set_names(vars)
+
+# Calculate the age at peak (median) phenotype value
+#ageAtPeakSs <- 10^(sort(dfSsterm$logAge)[which.max(medianCentileSs)])
+```
+
+Who are these kids with like really weirdly high total_WM scores and they are also the youngest??? --- 
+Per Lena: remove the first few data points due to edge effects.
+```{r}
+df <- lbcc_slip[match(unique(lbcc_slip$subject_study), lbcc_slip$subject_study),] %>% filter(!is.na(GAbins_recode) & GAbins_recode != "fetal" & PC_days_at_scan <= 2200) %>% arrange(logAge) #1707
+t <- df %>% filter(logAge < 2.75 & total_WM >= 400000)
+plot(t$logAge, t$total_WM)
+table(t$study) #all dHCP
+ggplot(lbcc_slip, aes(x = logAge,  y = total_WM, color = study)) + geom_point(alpha = 0.3) + theme_minimal()
+
+ggplot(df, aes(x = logAge,  y = total_WM, color = study)) + geom_point(alpha = 0.3) + theme_minimal()
+```
+
+models including GA status (categorical)
+**total_GM only has one VPM when age <= 1K days(might just need to model with VPM level dropped)
+```{r}
+vars <- c("total_GM", "subc_GM", "total_WM", "ventricles") 
+# df <- lbcc_slip[match(unique(lbcc_slip$subject_study), lbcc_slip$subject_study),] %>% filter(!is.na(GAbins_recode) & GAbins_recode != "fetal" & PC_days_at_scan <= 2200) %>% arrange(logAge) #1707
+df <- lbcc_slip[match(unique(lbcc_slip$subject_study), lbcc_slip$subject_study),] %>% filter(!is.na(GAbins_recode) & GAbins_recode != "fetal") %>% arrange(logAge) #14631
+df$GAbins_recode <- droplevels(df$GAbins_recode, exclude = "fetal")
+hist(df$PC_days_at_scan, breaks = 200)
+
+ggplot(df,(aes(x = logAge, y = total_GM, color = GAbins_recode))) + geom_point(alpha = 0.3) + theme_minimal()
+
+gc_allGA <- lapply(vars, function(x) {growthchart_modelGA(p = x, df = df, covs = c("sex", "GAbins_recode"), formula = "~fp(logAge, npoly=3) + sex + GAbins_recode - 1")}) %>% set_names(vars)
+```
+
+###Models v2 - yes study fx, no interaction, no fetal
+Age at peaks calculation needs to be adjusted for the new output of the centileCurves!
+Regular Model
+```{r}
+vars <- c("total_GM", "subc_GM", "total_WM", "ventricles")
+# Build the growth chart model
+#Get the correct df
+df <- lbcc_slip[match(unique(lbcc_slip$subject_study), lbcc_slip$subject_study),] %>% filter(!is.na(GAbins_recode) & GAbins_recode != "fetal") %>% arrange(logAge)#1707
+#hist(df$PC_days_at_scan, breaks = 200)
+
+test_me <- function(){
+gc_all<- lapply(vars, function(x) {growthchart_model(p = x, df = df, covs = c("sex", "study_recode"), formula = "~fp(logAge, npoly=3) + sex + random(study_recode) - 1")})
+}
+
+test_me <- function(){
+growthchart_model(p = "total_GM", df = df, covs = c("sex", "study_recode"), formula = "~fp(logAge, npoly=3) + sex + random(study_recode) - 1")}
+
+
+test_me()
+
+growthchart_model(p = "total_GM", df = df, covs = c("sex", "study_recode"), formula = "~fp(logAge, npoly=3) + sex + random(study_recode) - 1")
+
+#%>% set_names(vars)
+
+# Calculate the age at peak (median) phenotype value
+#ageAtPeakSs <- 10^(sort(dfSsterm$logAge)[which.max(medianCentileSs)])
+```
+
+Who are these kids with like really weirdly high total_WM scores and they are also the youngest??? --- 
+Per Lena: remove the first few data points due to edge effects.
+```{r}
+df <- lbcc_slip[match(unique(lbcc_slip$subject_study), lbcc_slip$subject_study),] %>% filter(!is.na(GAbins_recode) & GAbins_recode != "fetal" & PC_days_at_scan <= 2200) %>% arrange(logAge) #1707
+t <- df %>% filter(logAge < 2.75 & total_WM >= 400000)
+plot(t$logAge, t$total_WM)
+table(t$study) #all dHCP
+ggplot(lbcc_slip, aes(x = logAge,  y = total_WM, color = study)) + geom_point(alpha = 0.3) + theme_minimal()
+
+ggplot(df, aes(x = logAge,  y = total_WM, color = study)) + geom_point(alpha = 0.3) + theme_minimal()
+```
+
+###Models v3 - no study fx, no interaction fx, yes fetal data
+```{r}
+vars <- c("total_GM", "subc_GM", "total_WM", "ventricles") 
+# df <- lbcc_slip[match(unique(lbcc_slip$subject_study), lbcc_slip$subject_study),] %>% filter(!is.na(GAbins_recode) & GAbins_recode != "fetal" & PC_days_at_scan <= 2200) %>% arrange(logAge) #1707
+df <- lbcc_slip[match(unique(lbcc_slip$subject_study), lbcc_slip$subject_study),] %>% filter(!is.na(GAbins_recode)) %>% arrange(logAge)#14918
+df[which(df$GAbins_recode == "fetal"), "GAbins_recode"] <- "Term"
+df$GAbins_recode <- droplevels(df$GAbins_recode, exclude = "fetal")
+hist(df$PC_days_at_scan, breaks = 200)
+
+ggplot(df,(aes(x = logAge, y = total_GM, color = GAbins_recode))) + geom_point(alpha = 0.3) + theme_minimal()
+ggplot(df,(aes(x = logAge, y = total_WM, color = GAbins_recode))) + geom_point(alpha = 0.3) + theme_minimal()
+ggplot(df,(aes(x = logAge, y = subc_GM, color = GAbins_recode))) + geom_point(alpha = 0.3) + theme_minimal()
+ggplot(df,(aes(x = logAge, y = ventricles, color = GAbins_recode))) + geom_point(alpha = 0.3) + theme_minimal()
+
+gc_allGA <- lapply(vars, function(x) {growthchart_modelGA(p = x, df = df, covs = c("sex", "GAbins_recode"), formula = "~fp(logAge, npoly=3) + sex + GAbins_recode - 1")}) %>% set_names(vars)
+
+#Plot
+plots <- lapply(seq_along(vars), function(i){growthChart_plot(p = vars[i], df = df, centileCurves = gc_allGA[[i]]$centileCurves, title = "", by.preterm = TRUE)})
+
+plots[1]
+plots[2]
+plots[3]
+plots[4]
+
+```
+
+###Plotting the Curves -- CHANGE THIS TO PLOT AFTER EACH MODEL VERSION
+```{r}
+df <- lbcc_slip[match(unique(lbcc_slip$subject_study), lbcc_slip$subject_study),] %>% filter(!is.na(GAbins_recode) & GAbins_recode != "fetal" & PC_days_at_scan <= 1000) %>% arrange(logAge)#1707
+
+#No GA
+vars <- c("total_GM", "subc_GM", "total_WM", "ventricles")
+plots <- lapply(seq_along(vars), function(i){growthChart_plot(p = vars[i], df = df, centileCurves = gc_all[[i]]$centileCurves, title = "")})
+grid.arrange(grobs = plots[c(1,2,3,4)], ncol = 2)
+#GA
+vars <- c("subc_GM", "total_WM", "ventricles") #total_GM only has one VPM (might just need to model with VPM level dropped)
+plotsGA <- lapply(seq_along(vars), function(i){growthChart_plot(p = vars[i], df = df, centileCurves = gc_allGA[[i]]$centileCurves, title = "", by.preterm = TRUE)})
+grid.arrange(grobs = plotsGA[1:4], ncol = 2) #plot doesn't actually look nice. Legend repeated many times etc, need to figure this out later.
+
+growthChart_plot(p = "total_GM", df = df, centileCurves = gc_allGA$total_GM$centileCurves, title = "", by.preterm = TRUE)
+growthChart_plot(p = "subc_GM", df = df, centileCurves = gc_allGA$subc_GM$centileCurves, title = "", by.preterm = TRUE)
+growthChart_plot(p = "ventricles", df = df, centileCurves = gc_allGA$ventricles$centileCurves, title = "", by.preterm = TRUE)
+growthChart_plot(p = "total_WM", df = df, centileCurves = gc_allGA$total_WM$centileCurves, title = "", by.preterm = TRUE)
+
+growthChart_plot(p = "total_WM", df = df, centileCurves = gc_all$total_WM$centileCurves, title = "") + ylim(c(0,500000))
+
+plot(gc_allGA$total_WM$centileCurves[[4]]$logAge, gc_allGA$total_WM$centileCurves[[4]]$Term)
+plot(gc_allGA$total_WM$centileCurves[[4]]$logAge, gc_allGA$total_WM$centileCurves[[5]]$Term)
+plot(gc_allGA$total_WM$centileCurves[[4]]$logAge, gc_allGA$total_WM$centileCurves[[6]]$Term)
+plot(gc_allGA$total_WM$centileCurves[[4]]$logAge, gc_allGA$total_WM$centileCurves[[7]]$Term)
+
+plot(gc_all$total_WM$centileCurves[[4]]$logAge, gc_all$total_WM$centileCurves[[4]]$median)
+plot(gc_all$total_WM$centileCurves[[4]]$logAge, gc_all$total_WM$centileCurves[[5]]$median)
+plot(gc_all$total_WM$centileCurves[[4]]$logAge, gc_all$total_WM$centileCurves[[6]]$median)
+plot(gc_all$total_WM$centileCurves[[4]]$logAge, gc_all$total_WM$centileCurves[[7]]$median)
+ggplot(df, aes(x = logAge, y = total_WM, color = preterm)) + geom_point() + theme_minimal()
+
+#figure out plotting issues with total_WM
+
+#ggplot(df, aes(x = PC_days_at_scan, y = total_WM)) + geom_point()
+plot(gc_all$total_WM$centileCurves[[4]]$logAge, gc_all$total_WM$centileCurves[[4]]$median, ylab = "50th Centile", xlab = "logAge", main = "Total WM, all sample <= 2.2K days, n = 780")
+plot(gc_all$total_WM$centileCurves[[3]]$logAge, gc_all$total_WM$centileCurves[[3]]$median, ylab = "25th Centile", xlab = "logAge", main = "Total WM, all sample <= 2.2K days, n = 780")
+plot(df$logAge, df$total_WM, ylab = "total WM", xlab = "logAge", main = "Total WM, all sample <= 2.2K days, n = 780")
+
+growthChart_plot(p = "total_GM", df = df, centileCurves = gc_all[[1]]$centileCurves, title = "", by.sex = F)
+plots[[3]]
+```

@@ -1,0 +1,577 @@
+---
+title: "0205_0211"
+author: "Eren Kafadar"
+date: "2024-02-05"
+output: html_document
+---
+# Thoughts on this week
+
+Did not run gamlss last week.
+I would like to figure out the QC stuff - whether we can use the synthseg QC. Currently looking at some images on FSL viewer on respublika to see what low QC segmentations look like.
+For this week, I would like to reach out to Lena/Jakob to ask about GA in the LBCC dataset.
+I also would like to get a better understanding of the gamlss stuff - and see how it might perform with a smaller dataset. (what I have QC on currently)
+Also reading the Synthseg paper in more detail would be good.
+
+
+#Aaron mtg 02/05
+Euler # and manual ratings are correlated -- should have Euler numbers accessible (freesurfer was run on all those scans).
+Pick a threshold for QC using SS. Be able to explain why we pick the threshold we pick (could it be 0.5)? 
+
+Lack of correlation between QC and manual image quality: could be about how good synthseg is.
+Manual image ratings are about quality of scan.
+
+Only get scans that are T1w and MPR 1 scan/subj at first pass
+Look at QC dist based on scan type: T1 vs T2 
+
+Labels on fsleyes for synthseg(ask Jakob)
+
+Look at low-QC segmentations on fsleyes
+
+What is the deal with GMV and CSF when it comes to automated SS QC?
+
+***
+
+This is the script from Jenna's github that would be a helpful place to start to build gamlss models. There should also be Jakob's scripts that are more complicated but provide more flexibility (this is my understanding) in choosing a model.
+https://github.com/jmschabdach/mpr_analysis/blob/develop/r/build_your_own_growth_chart.R
+
+***
+
+Notes on Jenna Code
+- FreeSurfer model includes SurfaceHoles variable in model, not applicable in SynthSeg output.
+- logAge: numeric type with log(post conception age in days, base=10). In (1), we use a conversion factor of 325.25 days/year and a post conception offset of 280 days if post conception age is not available.
+#Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(magrittr)
+library(table1)
+library(ggplot2)
+library(rlang)
+library(viridis)
+library(gamlss) #to fit model
+library(mgcv) # helps with the gam models
+library(tidymv) # helps with the gam models
+
+setwd("/Users/ekafadar/Documents/Grad_School/BGDLab/GestationalAge/")
+source("/Users/ekafadar/Documents/Grad_School/BGDLab/GestationalAge/R/scripts/data_functions.R")
+source("~/Documents/Grad_School/BGDLab/GestationalAge/R/scripts/lib_mpr_analysis_EK.r")
+
+folders <- c("/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/2024-01-19_release/slip_2022/","/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/2024-01-19_release/slip_2023_02/", "/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/2024-01-19_release/slip_2023_03/")
+manual_qc_file <- "/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/manual_qc_grades_radiology_paper.csv"
+lbcc_ga_file <- "~/Documents/Grad_School/BGDLab/LBCC_data/GA.all.data-24-02.csv"
+```
+
+# Play - SLIP
+## Load Data
+Data Jenna sent is in 3 folders by release date
+There are 3 files in each folder
+- qc scores csv % synthseg volumes csv -- 2155 unique subject_ids, and 11267 unique data points (subject + age at scan?)
+- participants tsv -- 2173 total data
+
+Put all the data together from three releases and merge the qc scores, volumes, and participant data
+Save this full dataset
+###Load all csv data and merge
+```{r}
+participants <- load_data(names = c(paste0("data",1:3)), paste0(folders,"participants.tsv")) %>% bind_rows(.)
+qc_scores <- load_data(names = c(paste0("data",1:3)), paste0(folders,"synthseg+_qc_scores.csv")) %>% bind_rows(.)
+volumes <- load_data(names = c(paste0("data",1:3)), paste0(folders,"synthseg+_volumes.csv")) %>% bind_rows(.)
+colnames(qc_scores) <- c(paste0(names(qc_scores[1:8])),paste0(names(qc_scores[9:length(names(qc_scores))]),"_qc"))
+qc_manual <- load_data(names = "qc", manual_qc_file) %>% bind_rows(.)
+
+
+#merge
+full_data <- merge(qc_scores, volumes, by = intersect(names(qc_scores), names(volumes)))
+full_data <- merge(full_data, participants, by = intersect(names(full_data), names(participants)))
+write.csv(full_data, file = "/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_combined_011923.csv", quote = F, row.names = F)
+```
+saved SLIP_combined_011923.csv with 11267 rows and 137 variables
+
+###Load full data
+adjust variables: log10 age, get minQC column
+```{r}
+qc_manual <- load_data(names = "qc", manual_qc_file) %>% bind_rows(.)
+full_data <- read.csv("/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/SLIP_combined_011923.csv") 
+full_data$logAge <- log10(full_data$adjusted_age_in_days)
+full_data <- full_data %>% rowwise() %>% 
+  mutate(minQC = min(c_across(contains("qc"))))
+```
+
+###Split data by scan type, ageBin
+```{r}
+full_data$scan_type <- ifelse(grepl("MPR", full_data$scan_id), "MPR", ifelse((!grepl("MPR", full_data$scan_id) & grepl("T1w", full_data$scan_id)), "T1w_other", ifelse(grepl("T2w", full_data$scan_id), "T2w", ifelse(grepl("FLAIR", full_data$scan_id), "flair", NA))))
+full_data$ageBin <- cut(full_data$age_at_scan, breaks = c(-Inf, 30, 365, 1095, 2190, 4380, Inf), labels = c("Newborn", "Infant", "Toddler", "Preschool", "School_Age", "Adolescent"), include.lowest = TRUE)
+df_MPR <- full_data[grepl("MPR", full_data$scan_id),] %>% distinct(subject_id, .keep_all = T)#947
+
+#df_T1w <- full_data[!grepl("MPR", full_data$scan_id) & grepl("T1w", full_data$scan_id),] %>% distinct(subject_id, .keep_all = T)#1743
+
+#df_T2w <- full_data[grepl("T2w", full_data$scan_id),] %>% distinct(subject_id, .keep_all = T)#1021
+
+#table(grepl("FLAIR",full_data$scan_id))#891
+table(full_data$scan_type)
+table(full_data[full_data$subject_id %in% df_MPR$subject_id,]$scan_type)
+```
+
+1229 MPR scans, 947 unique subject ids
+6519 T1w non-MPR scans, 1743 unique subject ids
+2628 T2w scans, 1021 unique subject ids
+891 FLAIR scans
+-All 11267 scans accounted for above.
+
+###Separate df w/ GA
+Use scans with MPR. df_MPR
+!!! Noticed on 2/6/24 that the cut-offs were inclusive, so changed them to 31.9 and 36.9, this will change the #s of subjects for the categories down the line. So should re-run things!!
+```{r}
+GA_data <- subset(filter(full_data, scan_type == "MPR"), !is.na(gestational_age)) %>% distinct(subject_id, .keep_all = T)#358
+GA_data$log_GA <- log10(GA_data$gestational_age)
+#Split in GA bins
+# Determine the cut points based on quantiles
+cut_points <- quantile(GA_data$gestational_age, probs = c(1/3, 2/3)) # cut points are 39 and 40. So this will NOT work.
+
+cut_points <- quantile(GA_data$log_GA, probs = c(1/3, 2/3)) # cut points are 1.59 and 1.6. So this will NOT work.
+
+# Create a new column indicating cut points: specifying by weeks.
+GA_data$preterm <- cut(GA_data$gestational_age, breaks = c(-Inf, 31.9, 36.9, Inf), labels = c("VPM", "LPM", "Term"), include.lowest = TRUE)
+table(GA_data$preterm)
+table(GA_data$sex)
+```
+## Gestational Age
+***
+Boxplot of preterm categories
+Within the MPR data
+```{r}
+# Create a boxplot with ggplot2
+GA_boxplot <- function(df, value){
+  ggp_out <- ggplot(df, aes(x = preterm, y = {{value}})) +
+  geom_boxplot(aes(fill = preterm))}
+
+ggp <- GA_boxplot(GA_data, gestational_age)
+
+ggp + scale_fill_viridis(discrete = TRUE, alpha=0.6) +
+    geom_jitter(color="black", size=0.4, alpha=0.3) +
+    labs(x = "Preterm Categories", y = "Gestational Age") +
+    theme_minimal()
+hist(GA_data$gestational_age)
+hist(GA_data$adjusted_age_in_days)
+```
+## QC Scores
+###General QC notes
+synthseg QC scores is like a predicted dice coef, based on trained models, only trained for some values.
+this QC might not be good enough, might have to go back and do some QC
+Synthseg is hierarchical, ie finds cortex and then finds regions between them
+**Confirm with Jakob, 0.65 across every single one (all should be above 0.65 within a sample) Might need to do some sensitivity analyses.**
+
+For a subset of these there should be manual QC done. What about the relationship between the synthseg QC values vs manual QC values in that subset? Might be useful in terms of convincing synthseg automated QC could be sufficient.
+
+After the centile scores, see whether the centile score is related to QC and could include the QC score in the model (down the line, to control for it if it is affecting the centile score)
+
+ * Make a plot of the minimum QC score for each subject distribution. Shape of the distribution. Look at the distribution for the cut-off (hopefully around 0.65).$\checkmark$
+ * QC score against age, and against gestational age (any bias here?).$\checkmark$
+ * Plot GA availability with recency of scan (more likely to have GA?). *I don't think I have data for when the scan took place*
+
+Expectation: A higher proportion of data would have GA if its for people under < 5, with only more recent scans
+Look at QC scores for variables which include QC scores:
+ * general WM
+ * general GM
+ * general CSF
+ * cerebellum
+ * brainstem
+ * thalamus
+ * putamen.pallidum
+ * hippocampus.amygdala
+ 
+ ***
+###Correlations of QC with age, GA
+Both all data and data with GA have similar distribution of QC. There is a smaller peak at the very low end of minimum QC but bulk of scans have high QC < 0.6.
+Lowest QC score is from the youngest age at scan, but higher scores is evenly distributed. Significant positive corr 0.33, p-value < 2.2e-16
+For GA & QC score. Significant positive corr 0.15, p-value < 2.2e-16. Still sort of evenly distributed though (per plot).
+```{r}
+hist(GA_data$minQC)
+df_MPR <- filter(full_data, scan_type == "MPR") %>% distinct(subject_id, .keep_all = T)
+hist(df_MPR$minQC)
+
+#Look at relationship between age at scan & QC score
+plot(full_data$age_at_scan, full_data$minQC, main = "All Scans")
+cor.test(full_data$age_at_scan, full_data$minQC)
+
+plot(df_MPR$age_at_scan, df_MPR$minQC)
+cor.test(df_MPR$age_at_scan, df_MPR$minQC)
+#GA & QC score
+plot(GA_data$gestational_age, GA_data$minQC)
+cor.test(GA_data$gestational_age, GA_data$minQC)
+#GA & age at scan
+plot(GA_data$gestational_age, GA_data$age_at_scan)
+cor.test(GA_data$gestational_age, GA_data$age_at_scan)
+
+#Min QC < 0.650 / 0.60
+GA_data_qc <- GA_data %>%
+  filter(minQC >= 0.60)
+table(GA_data$preterm)
+table(GA_data_qc$preterm)
+table(GA_data$gestational_age)
+table(GA_data_qc$gestational_age)
+
+#Min QC < 0.650 / 0.60
+GA_data_qc <- GA_data %>%
+  filter(minQC >= 0.65)
+table(GA_data$preterm)
+table(GA_data_qc$preterm)
+table(GA_data$gestational_age)
+table(GA_data_qc$gestational_age)
+```
+###Is minQC Driven by any specific region?
+ggplot functions
+```{r}
+minQC_by_region_dens <- function(df, title = "QC Distribution by Region", xlab = "Sythseg Auto QC"){
+  p_dens <- ggplot(df) +
+ geom_density(aes(x = general.white.matter_qc, fill = "WM",color = "WM"), alpha = 0.4) +
+ geom_density(aes(x = general.grey.matter_qc, fill = "GM", color = "GM"), alpha = 0.4) +
+ geom_density(aes(x = general.csf_qc, fill = "CSF", color = "CSF"), alpha = 0.4) +
+ geom_density(aes(x = cerebellum_qc, fill = "Cerebellum", color = "Cerebellum"), alpha = 0.4) +
+ geom_density(aes(x = brainstem_qc, fill = "Brainstem", color = "Brainstem"), alpha = 0.4) +
+ geom_density(aes(x = thalamus_qc, fill = "Thalamus", color = "Thalamus"), alpha = 0.4) +
+ geom_density(aes(x = putamen.pallidum_qc, fill = "Put/Pal", color = "Put/Pal"), alpha = 0.4) +
+ geom_density(aes(x = hippocampus.amygdala_qc, fill = "Hip/Amy",color = "Hip/Amy"), alpha = 0.4) +
+ geom_density(aes(x = minQC, fill = "minQC"), alpha = 0) +
+ scale_fill_manual(values = c("WM" = "red", "GM" = "green", "CSF" = "blue", "Cerebellum" = "yellow", "Brainstem" = "orange", "Thalamus" = "purple", "Put/Pal" = "pink", "Hip/Amy"= "cyan", "minQC" = "black")) +
+   scale_color_manual(values = c("WM" = "red", "GM" = "green", "CSF" = "blue", "Cerebellum" = "yellow", "Brainstem" = "orange", "Thalamus" = "purple", "Put/Pal" = "pink", "Hip/Amy"= "cyan", "minQC" = "black"), guide = guide_none()) +
+ labs(title = title, y = "Frequency", x = xlab) }
+
+minQC_by_region_hist <- function(df, title = "QC Distribution by Region", xlab = "Sythseg Auto QC"){
+p_hist <- ggplot(df) +
+ geom_histogram(aes(x = general.white.matter_qc, fill = "WM"), alpha = 0.4, position = position_dodge()) +
+ geom_histogram(aes(x = general.grey.matter_qc, fill = "GM"), alpha = 0.4, position = position_dodge()) +
+ geom_histogram(aes(x = general.csf_qc, fill = "CSF"), alpha = 0.4, position = position_dodge()) +
+ geom_histogram(aes(x = cerebellum_qc, fill = "Cerebellum"), alpha = 0.4, position = position_dodge()) +
+ geom_histogram(aes(x = brainstem_qc, fill = "Brainstem"), alpha = 0.4, position = position_dodge()) +
+ geom_histogram(aes(x = thalamus_qc, fill = "Thalamus"), alpha = 0.4, position = position_dodge()) +
+ geom_histogram(aes(x = putamen.pallidum_qc, fill = "Put/Pal"), alpha = 0.4, position = position_dodge()) +
+ geom_histogram(aes(x = hippocampus.amygdala_qc, fill = "Hip/Amy"), alpha = 0.4, position = position_dodge()) +
+ geom_histogram(aes(x = minQC, fill = "minQC"), alpha = 0) +
+ scale_fill_manual(values = c("WM" = "red", "GM" = "green", "CSF" = "blue", "Cerebellum" = "yellow", "Brainstem" = "orange", "Thalamus" = "purple", "Put/Pal" = "pink", "Hip/Amy"= "cyan", "minQC" = "black")) +
+ labs(title = title, y = "Frequency", x = xlab) }
+```
+QC by different scan type, age bins
+- seem to be that CSF and GM have smaller QC values than other regions
+```{r}
+df <- full_data %>% group_by(scan_type) %>% distinct(subject_id, .keep_all = T)
+p_scan <- minQC_by_region_dens(df, title = "QC Distribution by Region, By Scan Type") + facet_wrap(~scan_type, nrow = 2)
+p_scan
+table(df$scan_type)
+#full data - MPR only
+df_MPR <- full_data %>% group_by(scan_type) %>% distinct(subject_id, .keep_all = T) %>% filter(scan_type == "MPR")
+#(minQC_by_region_hist(df_MPR, title = "QC Distribution by Region, MPR Only"))
+(minQC_by_region_dens(df_MPR, title = "QC Distribution by Region, MPR Only"))
+#GA only
+#(minQC_by_region_hist(GA_data, title = "QC Distribution by Region, MPR Only, w/ GA"))
+(minQC_by_region_dens(GA_data, title = "QC Distribution by Region, MPR Only, w/ GA"))
+#Get QC dist for each Age Bin.
+p_age <- minQC_by_region_dens(df_MPR, title = "QC Distribution by Region, MPR Only") + facet_wrap(~ageBin, nrow = 2)
+p_age
+table(df_MPR$ageBin)
+#By scan X age
+p_scanAge <- minQC_by_region_dens(df, title = "QC Distribution by Region, Age x Scan") + facet_wrap(~ageBin + scan_type, nrow = 3)
+p_scanAge
+```
+
+ ***
+###Manual QC and Auto QC similarity?
+SLIP paper used average QC >= 1.0
+Odds Ratio?
+For the full dataset
+```{r}
+df <- merge(full_data, qc_manual,by = c("subject_id", "session_id")) %>% group_by(scan_type) %>% distinct(subject_id, .keep_all = T) #273 of them
+df_MPR <- df %>% filter(scan_type == "MPR")
+plot(df_MPR$minQC, df_MPR$rawdata_image_grade)
+cor.test(df_MPR$minQC, df_MPR$rawdata_image_grade)
+sum(df$rawdata_image_grade >= 1) #222/273 using manual
+sum(df$minQC >= 0.65)#191/273 using SS auto
+sum(df$minQC >= 0.60)#266/273 using SS auto
+
+#if SS cut off were 0.65
+a <- sum(df$minQC >=0.65 & df$rawdata_image_grade >= 1)
+b <- sum(df$minQC <0.65 & df$rawdata_image_grade >= 1)
+c <- sum(df$minQC >=0.65 & df$rawdata_image_grade < 1)
+d <- sum(df$minQC <0.65 & df$rawdata_image_grade < 1)
+OR <- (a*d)/(b*c)
+df_QC_65 <- data.frame(SS_pass = c(a, c), SS_fail = c(b,d), row.names = c("manual_pass", "manual_fail"))
+mosaicplot(df_QC_65, shade = F)
+
+#if SS cut off were 0.6
+a <- sum(df$minQC >=0.6 & df$rawdata_image_grade >= 1)
+b <- sum(df$minQC <0.6 & df$rawdata_image_grade >= 1)
+c <- sum(df$minQC >=0.6 & df$rawdata_image_grade < 1)
+d <- sum(df$minQC <0.6 & df$rawdata_image_grade < 1)
+OR <- (a*d)/(b*c)
+df_QC_60 <- data.frame(SS_pass = c(a, c), SS_fail = c(b,d), row.names = c("manual_pass", "manual_fail"))
+mosaicplot(df_QC_60, shade = F)
+
+#plot overlap, by scan type
+hist(df_MPR$minQC)
+ggplot(df, aes(x=minQC, fill = as.factor(rawdata_image_grade))) + geom_histogram(bins = 20) + scale_x_continuous(breaks = pretty(df$minQC, n = 10)) + theme_minimal() + ggtitle("All data with QC, n = 472") + facet_wrap(~scan_type, nrow = 2)
+
+#plot overlap, by age bin
+ggplot(df, aes(x=minQC, fill = as.factor(rawdata_image_grade))) + geom_histogram(bins = 20) + scale_x_continuous(breaks = pretty(df$minQC, n = 10)) + theme_minimal() + ggtitle("All data with QC, n = 472") + facet_wrap(~ageBin, nrow = 2)
+
+#plot overlap, by ageXscan
+ggplot(df, aes(x=minQC, fill = as.factor(rawdata_image_grade))) + geom_histogram(bins = 20) + scale_x_continuous(breaks = pretty(df$minQC, n = 10)) + theme_minimal() + ggtitle("All data with QC, n = 472") + facet_wrap(~ageBin+scan_type, nrow = 3)
+
+```
+For the GA data
+odds ratio of being high QC under SS when high QC under manual is 2.43 (with SS value at 0.65)
+2.35 with SS value at 0.6
+80/101 pass manual QC, 56/101 pass SS auto QC (at 0.65)
+```{r}
+df <- merge(GA_data, qc_manual,by = c("subject_id", "session_id"))
+plot(df$minQC, df$rawdata_image_grade)
+cor.test(df$minQC, df$rawdata_image_grade)
+sum(df$rawdata_image_grade >= 1) #80/101 using manual
+sum(df$minQC >= 0.65)# 56/101 using SS auto
+
+#if SS cut off were 0.65
+a <- sum(df$minQC >=0.65 & df$rawdata_image_grade >= 1)
+b <- sum(df$minQC <0.65 & df$rawdata_image_grade >= 1)
+c <- sum(df$minQC >=0.65 & df$rawdata_image_grade < 1)
+d <- sum(df$minQC <0.65 & df$rawdata_image_grade < 1)
+OR <- (a*d)/(b*c)
+df_QC_65 <- data.frame(SS_pass = c(a, c), SS_fail = c(b,d), row.names = c("manual_pass", "manual_fail"))
+mosaicplot(df_QC_65, shade = F)
+
+#if SS cut off were 0.6
+a <- sum(df$minQC >=0.6 & df$rawdata_image_grade >= 1)
+b <- sum(df$minQC <0.6 & df$rawdata_image_grade >= 1)
+c <- sum(df$minQC >=0.6 & df$rawdata_image_grade < 1)
+d <- sum(df$minQC <0.6 & df$rawdata_image_grade < 1)
+OR <- (a*d)/(b*c)
+df_QC_60 <- data.frame(SS_pass = c(a, c), SS_fail = c(b,d), row.names = c("manual_pass", "manual_fail"))
+mosaicplot(df_QC_60, shade = F)
+
+#plot overlap
+hist(df$minQC)
+ggplot(df, aes(x=minQC, fill = as.factor(rawdata_image_grade))) + geom_histogram(bins = 20) + scale_x_continuous(breaks = pretty(df$minQC, n = 10)) + theme_minimal() + ggtitle("GA data with QC, n = 101")
+```
+ ***
+Logistic regression to predict manual QC value from SS auto QC
+- minQC IS a sig predictor ( p = 0.119, beta est = 4.5) of "pass" status in manual QC --- using only the MPR scans
+```{r}
+df_MPR <- full_data %>% group_by(scan_type) %>% distinct(subject_id, .keep_all = T) %>% filter(scan_type == "MPR")
+df <- merge(df_MPR, qc_manual,by = c("subject_id", "session_id")) %>% mutate(manual_QC_pass = rawdata_image_grade >= 1)
+df$manual_QC_pass<- factor(df$manual_QC_pass)
+logit <- glm(manual_QC_pass ~ minQC, data = df, family = "binomial")
+summary(logit)
+```
+
+ ***
+Notes after impromptu meeting with Jenna on 01/31 on QC stuff
+GM/CSF/WM -- could just be sums? Is QC value an average of these sums? Doesn't seem likely given the distributions.
+There is specific QC ratings for the manual ratings in the respublika folder for the SLIP radiology paper. This could be useful to look at specific ratings of the images.
+The specific images used to rate are also in this folder I think
+
+ ***
+###Looking at Individual Scans
+Take a look at individual scans that have
+- borderline auto QC 0.6/0.65
+- mismatched auto & manual QC
+- mid-low auto QC 0.2-0.4
+Look at about ~2-3 scans from each category in fsl viewer on Respublika
+Screenshot them for google slides.
+Choosing the scans to be looked at:
+``` {r}
+borderline_autoQC <- filter(GA_data, minQC < 0.65 & minQC >= 0.55)
+df <- merge(GA_data, qc_manual,by = c("subject_id", "session_id"))
+mismatch_QC_mnPS <- filter(df, rawdata_image_grade >= 1 & minQC < 0.65)
+mismatch_QC_ssPS <- filter(df, rawdata_image_grade < 1 & minQC >= 0.65)
+midlow_autoQC <- filter(GA_data, minQC < 0.4 & minQC > 0.2)
+set.seed(42)
+s1 <- borderline_autoQC[sample(nrow(borderline_autoQC), 1, replace = FALSE), ]
+s2 <-mismatch_QC_mnPS[sample(nrow(mismatch_QC_mnPS), 1, replace = FALSE), ]
+s3 <-mismatch_QC_ssPS[sample(nrow(mismatch_QC_ssPS), 1, replace = FALSE), ]
+s4 <-midlow_autoQC[sample(nrow(midlow_autoQC), 1, replace = FALSE), ]
+full_data[which(full_data$minQC == max(full_data$minQC)),]
+full_data[which(full_data$minQC > 0.75 & full_data$adjusted_age_in_days < 1500),]
+s4
+```
+Max Min QC 0.7655
+slip 2023-03 sub-HM14RHXMW_ses-201050308439procId006006ageDays_acq-MPR_run-001_T1w $\checkmark$
+adj age 6286 days
+
+High QC 0.7531 age 1399 days
+slip 2022 sub-HM18OTNFZ_ses-325726739876procId001362ageDays_acq-TSE_run-001_T1w $\checkmark$
+
+Borderline
+slip 2023-03 sub-HM36EP5TB_ses-297207596745procId001242ageDays_acq-TSE_run-002_T1w $\checkmark$
+minQC 0.6318
+adj age 1281 days
+
+slip 2023-02 	sub-HM34S3Z1_ses-95046832730procId000534ageDays_run-001_T2w
+minQC 0.6445
+adj age 573 days
+
+slip 2023-02 	sub-HM1WCY4QA_ses-186586445493procId003011ageDays_run-002_FLAIR
+minQC 0.6284
+adj age 3051 days
+
+
+Midlow
+23-03
+age 1065days
+minQC 0.3952
+sub-HM1WEGOWD_ses-320995680774procId001027ageDays_run-003_T2w
+**^ !!! I can't figure out how to display T2 images on fsleyes properly ...**
+
+23-02
+age 5531days
+minQC 0.2553
+sub-HM25RQYI4_ses-222549305714procId005496ageDays_run-004_T2w
+
+23-02
+age 1406days
+minQC 0.3752
+sub-HM2VQDK5U_ses-61776394344procId001366ageDays_run-003_T1w
+
+
+## Growth Charts
+Here I will fit a growth chart curve for the bins of data with GA.
+Going off of Jenna's code.
+
+Get GA data that passes QC standards
+sex as factor
+logAge, base 10 (post-conception offset of 280 days if post-conception age not available)
+
+Ran gamlss on term QC corrected sample with logAge and sex. The centile curves looks very zig-zag?
+Also geom_point layer cannot be computed. Keeps giving error: 
+Error in `geom_point()`:
+! Problem while computing aesthetics.
+ℹ Error occurred in the 1st layer.
+Caused by error in `new_tibble()`:
+! `names` must not be `NULL`.
+
+###Running the Model
+```{r}
+GA_qc_manual <- merge(GA_data, qc_manual, by = c("subject_id", "session_id")) %>% filter(rawdata_image_grade >= 1) %>% mutate(sex = as.factor(sex))
+levels(GA_qc_manual$sex) <- c("F", "M") #male = 0, female = 1
+GA_qc_SS <- GA_data %>% filter(minQC >= 0.65) %>% mutate(sex = as.factor(sex))
+levels(GA_qc_SS$sex) <- c("F", "M") #male = 0, female = 1
+
+# Build the growth chart model
+p <- "TCV" # specify the phenotype
+#Data split by preterm
+GA_qc_SS_vpm <- GA_qc_SS %>% filter(preterm == "VPM")
+GA_qc_SS_lpm <- GA_qc_SS %>% filter(preterm == "LPM")
+dfSSterm <- GA_qc_SS %>% filter(preterm == "Term") %>% select(c("sex", "logAge", "TCV")) 
+
+# No SurfaceHoles in the SynthSeg (SS) model
+#The df should have no NAs. So create df for the specific variables needed. Or remove all the variables with NAs.
+formulaSs <- as.formula(paste0(p, "~fp(logAge, npoly=3) + sex - 1"))
+growthChartModelSs <-gamlss(formula = formulaSs,
+                            sigma.formula = formulaSs,
+                            nu.formula = as.formula(paste0(p, "~1")),
+                            family = GG,
+                            data = dfSSterm,
+                            control = gamlss.control(n.cyc = 200),  # See (2)
+                            trace = F)
+
+
+```
+
+###Predicting Centiles
+```{r}
+# Predict the median centile of each model
+medianCentileSs <- predictCentilesForAgeRange(growthChartModelSs, dfSSterm$logAge)
+
+# Calculate the age at peak (median) phenotype value
+ageAtPeakSs <- 10^(sort(dfSSterm$logAge)[which.max(medianCentileSs)])
+
+# Predict a set of centiles for each model
+centileCurvesSs <- c()
+desiredCentiles <- c(0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
+for (i in c(1:length(desiredCentiles))){
+  centileCurvesSs[[i]] <- predictCentilesForAgeRange(growthChartModelSs, dfSSterm$logAge, 
+                                                     cent=desiredCentiles[[i]])}
+```
+
+###Plotting the Curves
+```{r}
+# Set up a list of tick marks to use on log(post-conception age) x-axes
+tickMarks <- c()
+for (year in c(0, 1, 2, 5, 10, 20)){ # years
+  tickMarks <- append(tickMarks, log(year*365.25 + 280, base=10)) #currently has the standard 280 adjustment, but is this reasonable? Perhaps for the scale yes.
+}
+tickLabels <- c("Birth", "1", "2", "5", "10", "20")
+
+
+# Plot the original data and the set of centile curves on a figure
+plotSs <- ggplot() +
+  #geom_point(aes(x=dfSSterm$logAge, dfSSterm[, p]), alpha=0.5) +
+  geom_line(aes(x=sort(dfSSterm$logAge), y=centileCurvesSs[[1]]), alpha=0.4) +
+  #geom_line(aes(x=dfSSterm$logAge, y=centileCurvesSs[[2]]), alpha=0.6) +
+  #geom_line(aes(x=dfSSterm$logAge, y=centileCurvesSs[[3]]), alpha=0.8) +
+  #geom_line(aes(x=dfSSterm$logAge, y=centileCurvesSs[[4]])) +
+  #geom_line(aes(x=dfSSterm$logAge, y=centileCurvesSs[[5]]), alpha=0.8) +
+  #geom_line(aes(x=dfSSterm$logAge, y=centileCurvesSs[[6]]), alpha=0.6) +
+  #geom_line(aes(x=dfSSterm$logAge, y=centileCurvesSs[[7]]), alpha=0.4) +
+  scale_x_continuous(breaks=tickMarks, labels=tickLabels, 
+                     limits=c(tickMarks[[1]], max(dfSSterm$logAge))) +
+  labs(title=paste0("Sample Growth Chart for ", p)) + 
+  xlab("Age at scan (log(years))") +
+  ylab(paste0(p, " Centile")) + 
+  theme(axis.line = element_line(colour = "black"),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        text = element_text(size = 18))
+
+print(plotSs)
+
+
+# Calculate the closest centile to each subject's phenotype value
+phenoCentilesSs <- calculatePhenotypeCentile(growthChartModelSs, dfSSterm[[p]], dfSSterm$logAge, dfSSterm$sex)
+regionsSs <- rep(p, length(phenoCentilesSs))
+idxesSs <- c(1:length(phenoCentilesSs))
+
+# Plot the centiles of the phenotypes in a violin plot
+dfSsViolin <- data.frame(idxesSs, regionsSs, phenoCentilesSs)
+plotPhenoCentSs <- ggplot(data=dfSsViolin, aes(regionsSs, phenoCentilesSs)) +
+  geom_violin(color="gray", fill="gray", alpha=0.35) +
+  geom_jitter(height = 0, width=0.15, alpha=0.65) +
+  labs(title=paste0("Centiles (Phenotype = ", p,")")) +
+  xlab("SynthSeg") +
+  ylab("Centile Value") +
+  theme(axis.line = element_line(colour = "black"),
+        # panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        text = element_text(size = 18))
+
+print(plotPhenoCentSs)
+plot(dfSSterm$logAge, dfSSterm$TCV)
+```
+#Play - LBCC
+Got LBCC data from Lena
+
+##Load Data
+```{r}
+lbcc <- load_data(names = "lbcc", lbcc_ga_file) %>% bind_rows(.) %>%  select(-1, -2) #drop first two columns, repeat of row numbers
+length(unique(lbcc$participant))#15779 unique participant IDs
+```
+##Inspect Data Distribution
+~10K from ABCD (over 50% of data points)
+Harvard fetal and dHCP data - aren't born yet lol.
+DCHS study might not be appropriate, it is a dataset of southafrican moms & babies. Delete it!
+CONTE & CHILD & TEBC do not have regional info (but might have for subcortical volumes)
+!!Add the SLIP scans to this dataset.
+```{r}
+table(lbcc$study)
+sum(is.na(lbcc$PCW_at_birth)) #603
+sum(is.na(lbcc$PCW_at_birth_recoded))#338
+range(na.omit(lbcc$PCW_at_birth))#[2 50]
+boxplot(lbcc$PCW_at_birth)
+boxplot(lbcc$PCW_at_scan)
+hist(lbcc$PCW_at_scan)
+
+#Preterm categories (broad)
+# Create a new column indicating cut points: specifying by weeks.
+lbcc$preterm <- cut(lbcc$PCW_at_birth, breaks = c(-Inf, 31.9, 36.9, Inf), labels = c("VPM", "LPM", "Term"), include.lowest = TRUE)
+table(lbcc$preterm)
+table(lbcc[match(unique(lbcc$participant), lbcc$participant),"preterm"])
+```

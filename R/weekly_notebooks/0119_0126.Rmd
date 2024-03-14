@@ -1,0 +1,241 @@
+---
+title: "0119_0126"
+author: "Eren Kafadar"
+date: "2024-01-19"
+output: html_document
+---
+# Thoughts on this week
+
+New release of SLIP data is out 01/19 afternoon
+Per mtg with Lena on 01/08, I could start with fitting a gamlls model to the data split by different groups of GA at birth: very pre-term (VPM), pre-term (PM), and TERM. This would only change the intercept of the growth curve and not the trajectory, but would be a good place to start & to get used to how gamlls functions work.
+
+Creating a separate functions file is a good idea. I am planning to re-consodilate the work in this week's markdown in a functions file by the end of this week.
+
+This is the script from Jenna's github that would be a helpful place to start to build gamlss models. There should also be Jakob's scripts that are more complicated but provide more flexibility (this is my understanding) in choosing a model.
+https://github.com/jmschabdach/mpr_analysis/blob/develop/r/build_your_own_growth_chart.R
+
+***
+
+Notes on Jenna Code
+- FreeSurfer model includes SurfaceHoles variable in model, not applicable in SynthSeg output.
+- logAge: numeric type with log(post conception age in days, base=10). In (1), we use a conversion factor of 325.25 days/year and a post conception offset of 280 days if post conception age is not available.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(magrittr)
+library(table1)
+library(ggplot2)
+library(rlang)
+library(viridis)
+setwd("/Users/ekafadar/Documents/Grad_School/BGDLab/GestationalAge/")
+source("/Users/ekafadar/Documents/Grad_School/BGDLab/GestationalAge/R/scripts/data_functions.R")
+folders <- c("/Users/ekafadar/Documents/Grad_School/BGDLab/2024-01-19_release/slip_2022/","/Users/ekafadar/Documents/Grad_School/BGDLab/2024-01-19_release/slip_2023_02/", "/Users/ekafadar/Documents/Grad_School/BGDLab/2024-01-19_release/slip_2023_03/")
+```
+
+# Play
+## Load Data
+Data Jenna sent is in 3 folders by release date
+There are 3 files in each folder
+- qc scores csv % synthseg volumes csv -- 2155 unique subject_ids, and 11267 unique data points (subject + age at scan?)
+- participants tsv -- 2173 total data
+
+Put all the data together from three releases and merge the qc scores, volumes, and participant data
+Save this full dataset
+```{r}
+participants <- load_data(names = c(paste0("data",1:3)), paste0(folders,"participants.tsv")) %>% bind_rows(.)
+qc_scores <- load_data(names = c(paste0("data",1:3)), paste0(folders,"synthseg+_qc_scores.csv")) %>% bind_rows(.)
+volumes <- load_data(names = c(paste0("data",1:3)), paste0(folders,"synthseg+_volumes.csv")) %>% bind_rows(.)
+colnames(qc_scores) <- c(paste0(names(qc_scores[1:8])),paste0(names(qc_scores[9:length(names(qc_scores))]),"_qc"))
+
+#merge
+full_data <- merge(qc_scores, volumes, by = intersect(names(qc_scores), names(volumes)))
+full_data <- merge(full_data, participants, by = intersect(names(full_data), names(participants)))
+write.csv(full_data, file = "/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_combined_011923.csv", quote = F, row.names = F)
+```
+saved SLIP_combined_011923.csv with 11267 rows and 137 variables
+
+## Gestational Age
+Get the data with GA separated.
+```{r}
+full_data <- read.csv("/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_combined_011923.csv") 
+GA_data <- subset(full_data, !is.na(gestational_age))
+```
+
+I plan to check whether there are any ids with GA data on one obs, but not on other obs -- as a sanity check.
+```{r}
+#Sanity Checks
+sum(!is.na(participants$gestational_age))
+participants_all <- load_data(names = c("22","23-02","23-03"), paste0(folders,"participants.tsv"))
+sum(participants_all[[1]]$subject_id %in% participants_all[[2]]$subject_id)
+sum(participants_all[[1]]$subject_id %in% participants_all[[3]]$subject_id)
+sum(participants_all[[2]]$subject_id %in% participants_all[[3]]$subject_id)
+
+participants_all[[1]][participants_all[[1]]$subject_id %in% participants_all[[2]]$subject_id,]
+participants_all[[2]][participants_all[[2]]$subject_id %in% participants_all[[1]]$subject_id,]
+
+participants_all[[1]][participants_all[[1]]$subject_id %in% participants_all[[3]]$subject_id,]
+participants_all[[3]][participants_all[[3]]$subject_id %in% participants_all[[1]]$subject_id,]
+```
+6 participant IDs are repeated in combined participants data
+There are 3165 obs with GA, 578 unique subject ids
+26.8% of subjects have GA
+28% of obs have GA
+
+***
+
+Then I will look at distribution of GA data, and general summary stats on the ids with GA data vs no GA data (on demographics, and also maybe total intracranial vol, and maybe qc metrics?)
+```{r}
+sum(GA_data$gestational_age < 37) #520 (all preterm)
+##
+sum(GA_data$gestational_age < 28) #35 (extremely preterm)
+sum(GA_data$gestational_age < 32  & GA_data$gestational_age >= 28) #87 (very preterm)
+sum(GA_data$gestational_age < 34 & GA_data$gestational_age >= 32) #75 (moderate preterm)
+sum(GA_data$gestational_age < 37 & GA_data$gestational_age >= 34) #323 (late preterm)
+sum( GA_data$gestational_age >= 37) #2645 (at term)
+
+
+#looking at other variables based on availability of GA data
+sum(GA_data$sex == "Male") # 1823
+full_data$GA_NA <- is.na(full_data$gestational_age)
+#Calculate ummary statistics by group
+summary_stats <- full_data %>%
+  group_by(GA_NA) %>%
+  summarise_if(is.numeric, list(
+    Mean = mean,                # Mean value
+    SD = sd,                    # Standard deviation
+    Median = median             # Median value
+  ))
+
+print(summary_stats)
+t.test(full_data$adjusted_age_in_days ~ full_data$GA_NA)
+
+hist(GA_data$gestational_age, main = "Gestational Age")
+hist(log10(GA_data$gestational_age))
+GA_data$log_GA <- log10(GA_data$gestational_age)
+```
+520 obs pre-term (<37wks)
+2456 obs at term (>=37wks)
+--
+35 obs extremely pre-term (<28wks)
+70 obs very preterm (<32wks)
+54 obs moderate preterm 32-34
+279 obs late preterm 34-37
+
+Sex for those with GA data
+1823 Male
+1342 Female
+
+- those with GA data are younger than those who are not (adjusted age), sig. by 1588 days between means, SD actually lower for those with GA data
+- lower values for GA data across many structural variables, could simply be a function of age difference
+
+Log10 GA seems better spread on the histogram at least?
+
+***
+
+Then I will split the GA data into bins (depending on GA distribution).
+First trying to split into thirds and seeing where the cutoffs are.
+```{r}
+#Split in GA bins
+# Determine the cut points based on quantiles
+cut_points <- quantile(GA_data$gestational_age, probs = c(1/3, 2/3)) # cut points are 39 and 40. So this will NOT work.
+
+cut_points <- quantile(GA_data$log_GA, probs = c(1/3, 2/3)) # cut points are 1.59 and 1.6. So this will NOT work.
+
+# Create a new column indicating cut points: specifying by weeks.
+GA_data$preterm <- cut(GA_data$gestational_age, breaks = c(-Inf, 32, 37, Inf), labels = c("VPM", "LPM", "Term"), include.lowest = TRUE)
+
+# Create a boxplot with ggplot2
+GA_boxplot <- function(df, value){
+  ggp_out <- ggplot(df, aes(x = preterm, y = {{value}})) +
+  geom_boxplot(aes(fill = preterm))}
+
+ggp <- GA_boxplot(GA_data, gestational_age)
+
+ggp + scale_fill_viridis(discrete = TRUE, alpha=0.6) +
+    geom_jitter(color="black", size=0.4, alpha=0.3) +
+    labs(x = "Preterm Categories", y = "Gestational Age") +
+    theme_minimal()
+GA_data %>% count(preterm)
+
+```
+VPM 143
+LPM 566
+Term 2456
+
+## QC Scores
+synthseg QC scores is like a predicted dice coef, based on trained models, only trained for some values.
+this QC might not be good enough, might have to go back and do some QC
+Synthseg is hierarchical, ie finds cortex and then finds regions between them
+**Confirm with Jakob, 0.65 across every single one (all should be above 0.65 within a sample) Might need to do some sensitivity analyses.**
+<span style="color: red;"> Jakob said we only used the manual QC values, not the synthseg ones. Jenna will send the manual QC values by the end of the week. - I could continue for now with the synthseg QC values, and check what changes when using the manual QC values. Q - is this what sensitivity analysis is? </span>
+
+For a subset of these there should be manual QC done. What about the relationship between the synthseg QC values vs manual QC values in that subset? Might be useful in terms of convincing synthseg automated QC could be sufficient.
+
+After the centile scores, see whether the centile score is related to QC and could include the QC score in the model (down the line, to control for it if it is affecting the centile score)
+
+ * Make a plot of the minimum QC score for each subject distribution. Shape of the distribution. Look at the distribution for the cut-off (hopefully around 0.65).$\checkmark$
+ * QC score against age, and against gestational age (any bias here?).$\checkmark$
+ * Plot GA availability with recency of scan (more likely to have GA?). *I don't think I have data for when the scan took place*
+
+Expectation: A higher proportion of data would have GA if its for people under < 5, with only more recent scans
+Look at QC scores for variables which include QC scores:
+ * general WM
+ * general GM
+ * general CSF
+ * cerebellum
+ * brainstem
+ * thalamus
+ * putamen.pallidum
+ * hippocampus.amygdala
+
+```{r}
+#Get the minimum QC value for each obs
+GA_data <- GA_data %>% rowwise() %>% 
+  mutate(minQC = min(c_across(contains("qc"))))
+full_data <- full_data %>% rowwise() %>% 
+  mutate(minQC = min(c_across(contains("qc"))))
+
+hist(GA_data$minQC)
+hist(full_data$minQC)
+
+#Look at relationship between age at scan & QC score
+plot(GA_data$age_at_scan, GA_data$minQC)
+cor.test(GA_data$age_at_scan, GA_data$minQC)
+#GA & QC score
+plot(GA_data$gestational_age, GA_data$minQC)
+cor.test(GA_data$gestational_age, GA_data$minQC)
+
+#Min QC < 0.650
+GA_data_qc <- GA_data %>%
+  filter(minQC >= 0.60) #2394 obs out of 3165
+table(GA_data$preterm)
+table(GA_data_qc$preterm)
+table(GA_data$gestational_age)
+table(GA_data_qc$gestational_age)
+```
+
+***
+Both all data and data with GA have similar distribution of QC. There is a smaller peak at the very low end of minimum QC but bulk of scans have high QC < 0.6.
+
+Lowest QC score is from the youngest age at scan, but higher scores is evenly distributed. Significant positive corr 0.33, p-value < 2.2e-16
+For GA & QC score. Significant positive corr 0.15, p-value < 2.2e-16. Still sort of evenly distributed though (per plot).
+
+**0.65**
+1579/3165 have QC > 0.65 ~ 49% of the total # of obs
+**0.60**
+2394/3165 have QC > 0.60 ~ 75% of the total # of obs
+80/143 VPM -- proportionally more VPM QC-ed out.
+409/566
+1905/2456
+
+
+## Growth Charts
+Here I will fit a growth chart curve for the bins of data with GA.
+Going off of Jenna's code.
+
+```{r}
+
+
+```
