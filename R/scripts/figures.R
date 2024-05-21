@@ -5,6 +5,10 @@ GA_boxplot <- function(df, value){
 group_smooth <- function(df, group, y_value, x_value, se = FALSE, method = "loess"){
   ggplot(df, aes(x = {{x_value}}, y = {{y_value}}, color = {{group}})) + geom_point(alpha = 0.2) + geom_smooth(method = method, se = se) +  labs(title = paste0("By ", deparse(substitute(group)))) + theme_minimal()
 }
+group_smooth_onlyLine <- function(df, group, y_value, x_value, se = FALSE, method = "loess"){
+  ggplot(df, aes(x = {{x_value}}, y = {{y_value}}, color = {{group}})) + geom_smooth(method = method, se = se) +  labs(title = paste0("By ", deparse(substitute(group)))) + theme_minimal()
+}
+
 
 group_median <- function(df, group, value, CI = TRUE, coef = 0, outlier = FALSE, notch = TRUE) {
   if(outlier == FALSE){
@@ -64,7 +68,7 @@ minQC_by_region_hist <- function(df, title = "QC Distribution by Region", xlab =
 
 
 #if output of centile curves is better organized, could potentially edit this function to be customizable to whichever "grouping" (sex, GA, interaction) I want to customize
-growthChart_plot <- function(p, df, centileCurves, xlab = "Age at scan (years)", title = NULL, tickMarks = NULL, tickLabels = NULL, print = FALSE, by.sex = FALSE, by.preterm = FALSE){
+growthChart_plot <- function(p, df, centileCurves, xlab = "Age at scan (years)", title = NULL, tickMarks = NULL, tickLabels = NULL, print = FALSE, by.sex = FALSE, by.GAbins= FALSE, by.preterm = FALSE){
   #define title if NULL
   if (is.null(title)){
     title <- paste0("Sample Growth Chart for ", p)
@@ -79,9 +83,9 @@ growthChart_plot <- function(p, df, centileCurves, xlab = "Age at scan (years)",
     }
   }
 # Plot the original data and the set of centile curves on a figure
-  if(by.sex == FALSE & by.preterm == FALSE){
+  if(by.sex == FALSE & by.preterm == FALSE & by.GAbins == FALSE){
     plot <- ggplot() +
-      geom_point(aes(x=df$logAge, df[, p]), alpha=0.5) +
+      geom_point(aes(x=df$logAge, df[, p]), alpha=0.1) +
       geom_line(aes(x=centileCurves[[1]]$logAge, y=centileCurves[[1]]$median), alpha=0.4) +
       geom_line(aes(x=centileCurves[[2]]$logAge, y=centileCurves[[2]]$median), alpha=0.6) +
       geom_line(aes(x=centileCurves[[3]]$logAge, y=centileCurves[[3]]$median), alpha=0.8) +
@@ -93,7 +97,7 @@ growthChart_plot <- function(p, df, centileCurves, xlab = "Age at scan (years)",
                          limits=c(tickMarks[[1]], max(centileCurves[[1]]$logAge))) +
       labs(title=title) +
       xlab(xlab) +
-      ylab(paste0(p, " Centile")) +
+      ylab(paste0(p)) +
       theme(axis.line = element_line(colour = "black"),
             panel.grid.minor = element_blank(),
             panel.border = element_blank(),
@@ -127,7 +131,7 @@ growthChart_plot <- function(p, df, centileCurves, xlab = "Age at scan (years)",
                          limits=c(tickMarks[[1]], max(centileCurves[[1]]$logAge))) +
       labs(title=paste0(title, "By Sex")) +
       xlab(xlab) +
-      ylab(paste0(p, " Centile")) +
+      ylab(paste0(p)) +
       theme(axis.line = element_line(colour = "black"),
             panel.grid.minor = element_blank(),
             panel.border = element_blank(),
@@ -138,8 +142,8 @@ growthChart_plot <- function(p, df, centileCurves, xlab = "Age at scan (years)",
       }
     return(plot_sex)
   }
-  else if (by.preterm == TRUE) {
-    plot_preterm <- ggplot() +
+  else if (by.GAbins == TRUE) {
+    plot_GAbins <- ggplot() +
       geom_point(aes(x=df$logAge, df[, p], color = df$GAbins_recode), alpha=0.25) + 
       scale_color_manual(values = c("VPM" = "red", "LPM" = "blue", "Term" = "green")) +
       ##VPM curves
@@ -171,7 +175,43 @@ growthChart_plot <- function(p, df, centileCurves, xlab = "Age at scan (years)",
                          limits=c(tickMarks[[1]], max(centileCurves[[1]]$logAge))) +
       labs(title=paste0(title, "By Preterm Status")) +
       xlab(xlab) +
-      ylab(paste0(p, " Centile")) +
+      ylab(paste0(p)) +
+      theme(axis.line = element_line(colour = "black"),
+            panel.grid.minor = element_blank(),
+            panel.border = element_blank(),
+            panel.background = element_blank(),
+            text = element_text(size = 18))
+    if(print == TRUE){
+      print(plot_GAbins)
+    }
+    return(plot_GAbins)
+  }
+  else if (by.preterm == TRUE) {
+    plot_preterm <- ggplot() +
+      geom_point(aes(x=df$logAge, df[, p], color = df$preterm), alpha=0.25) + 
+      scale_color_manual(values = c("Preterm" = "red", "Term" = "green")) +
+      ##Pterm curves
+      #geom_line(aes(x=centileCurves[[1]]$logAge, y=centileCurves[[1]]$Pterm), alpha=0.4, color = "red") +
+      geom_line(aes(x=centileCurves[[2]]$logAge, y=centileCurves[[2]]$Pterm), alpha=0.6, color = "red") +
+      #geom_line(aes(x=centileCurves[[3]]$logAge, y=centileCurves[[3]]$Pterm), alpha=0.8, color = "red") +
+      geom_line(aes(x=centileCurves[[4]]$logAge, y=centileCurves[[4]]$Pterm), color = "red") +
+      #geom_line(aes(x=centileCurves[[5]]$logAge, y=centileCurves[[5]]$Pterm), alpha=0.8, color = "red") +
+      geom_line(aes(x=centileCurves[[6]]$logAge, y=centileCurves[[6]]$Pterm), alpha=0.6, color = "red") +
+      #geom_line(aes(x=centileCurves[[7]]$logAge, y=centileCurves[[7]]$Pterm), alpha=0.4, color = "red") +
+      ##Term curves
+      #geom_line(aes(x=centileCurves[[1]]$logAge, y=centileCurves[[1]]$Term), alpha=0.4, color = "green") +
+      geom_line(aes(x=centileCurves[[2]]$logAge, y=centileCurves[[2]]$Term), alpha=0.6, color = "green") +
+      #geom_line(aes(x=centileCurves[[3]]$logAge, y=centileCurves[[3]]$Term), alpha=0.8, color = "green") +
+      geom_line(aes(x=centileCurves[[4]]$logAge, y=centileCurves[[4]]$Term), color = "green") +
+      #geom_line(aes(x=centileCurves[[5]]$logAge, y=centileCurves[[5]]$Term), alpha=0.8, color = "green") +
+      geom_line(aes(x=centileCurves[[6]]$logAge, y=centileCurves[[6]]$Term), alpha=0.6, color = "green") +
+      #geom_line(aes(x=centileCurves[[7]]$logAge, y=centileCurves[[7]]$Term), alpha=0.4, color = "green") +
+      
+      scale_x_continuous(breaks=tickMarks, labels=tickLabels,
+                         limits=c(tickMarks[[1]], max(centileCurves[[1]]$logAge))) +
+      labs(title=paste0(title, "By Preterm Status")) +
+      xlab(xlab) +
+      ylab(paste0(p)) +
       theme(axis.line = element_line(colour = "black"),
             panel.grid.minor = element_blank(),
             panel.border = element_blank(),

@@ -19,10 +19,14 @@ library(ggpubr) # show the t-test on the plot
 # @param ageRange A list of log(post conception age in days) 
 # @param euler The median SurfaceHoles value (option, produced by FreeSurfer)
 # @param cent The desired centile in decimal form (default = 0.5)
-predictCentilesForAgeRange<- function(gamModel, ageRange, euler=0, cent=0.5, by.sex = TRUE, df = NULL){
+predictCentiles_ABCD <- function(gamModel, ageRange, euler=0, cent=0.5, by.sex = TRUE, df = NULL){
   if (euler == 0){
+    # dataToPredictM <- data.frame(log_age=ageRange,
+    #                              sex=c(rep(as.factor("Male"), length(ageRange))),
+    #                              fs_version=c(rep(Mode(df$fs_version), length(ageRange))),
+    #                              study=c(as.factor(rep(Mode(df$study), length(ageRange)))))
     newDataM <- data.frame(logAge=ageRange,
-                           sex=c(rep(as.factor("M"), length(ageRange))))
+                  sex=c(rep(as.factor("M"), length(ageRange))))
     newDataF <- data.frame(logAge=ageRange,
                            sex=c(rep(as.factor("F"), length(ageRange))))
   } else  {
@@ -62,81 +66,31 @@ predictCentilesForAgeRange<- function(gamModel, ageRange, euler=0, cent=0.5, by.
   # Return a DF that returns the age with it
   return(centOut)
 }
-#Attempt to model with study effects
-# predictCentilesForAgeRange<- function(gamModel, ageRange, euler=0, cent=0.5, by.sex = TRUE, df = NULL){
-#   if (euler == 0){
-#     # dataToPredictM <- data.frame(log_age=ageRange,
-#     #                              sex=c(rep(as.factor("Male"), length(ageRange))),
-#     #                              fs_version=c(rep(Mode(df$fs_version), length(ageRange))),
-#     #                              study=c(as.factor(rep(Mode(df$study), length(ageRange)))))
-#     newDataM <- data.frame(logAge=ageRange,
-#                   sex=c(rep(as.factor("M"), length(ageRange))),
-#                   study_recode=c(as.factor(rep(levels(df$study_recode)[1], length(ageRange)))))
-#     newDataF <- data.frame(logAge=ageRange,
-#                            sex=c(rep(as.factor("F"), length(ageRange))),
-#                            study_recode=c(as.factor(rep(levels(df$study_recode)[1], length(ageRange)))))
-#   } else  {
-#     newDataM <- data.frame(logAge=ageRange,
-#                            SurfaceHoles=c(rep(euler, length(ageRange))),
-#                            sex=c(rep(as.factor("M"),  length(ageRange))))
-#     
-#     newDataF <- data.frame(logAge=ageRange,
-#                            SurfaceHoles=c(rep(euler, length(ageRange))),
-#                            sex=c(rep(as.factor("F"),  length(ageRange))))
-#   } 
-#   
-#   # Predict phenotype values for set age range for each sex
-#   gammModelM <- predictAll(gamModel, newdata=newDataM, type="response", data = df)
-#   gammModelF <- predictAll(gamModel, newdata=newDataF, type="response", data = df)
-#   
-#   # Calculate the `cent`th centiles for the sex models
-#   phenoMedianPredsM <- qGG(c(cent), 
-#                            mu=gammModelM$mu, 
-#                            sigma=gammModelM$sigma, 
-#                            nu=gammModelM$nu)
-#   
-#   phenoMedianPredsF <- qGG(c(cent), 
-#                            mu=gammModelF$mu, 
-#                            sigma=gammModelF$sigma, 
-#                            nu=gammModelF$nu)
-#   
-#   # Average the two calculated centile curves 
-#   # For visualizations and correlations with the LBCC data
-#   phenoMedianPreds <- (phenoMedianPredsF + phenoMedianPredsM)/2
-#   
-#   centOut <- list(female = NULL, male = NULL, median = NULL, logAge = ageRange)
-#   centOut$female <- phenoMedianPredsF
-#   centOut$male <- phenoMedianPredsM
-#   centOut$median <- phenoMedianPreds
-#   # Return the calculated centile curve
-#   # Return a DF that returns the age with it
-#   return(centOut)
-# }
-# 
-# ##
-# # Estimate the centile closest to each phenotype value in a list
-# # @param model A GAMLSS model
-# # @param measuredPhenotypeValue A list of phenotype values
-# # @param logAge A list of log(post conception age in days, base=10)
-# # @param sex A list of the sex of each subject where each value is a factor
-# # @param surfaceHoles A list of SurfaceHoles (optional, produced by FreeSurfer)
-# calculatePhenotypeCentile <- function(model, measuredPhenotypeValue, logAge, sex, df, surfaceHoles=c()){
-#   centiles <- c()
-#   
-#   for (i in 1:length(measuredPhenotypeValue)){
-#     if (length(surfaceHoles) == 0) {
-#       newData <- data.frame(logAge=logAge[[i]],
-#                             sex=sex[[i]])
-#     } else {
-#       newData <- data.frame(logAge=logAge[[i]],
-#                             SurfaceHoles=surfaceHoles[[i]],
-#                             sex=sex[[i]])
-#     }
-#     predModel <- predictAll(model, newdata=newData, type="response", data = df)
-#     centiles[i] <- pGG(measuredPhenotypeValue[[i]], mu=predModel$mu, sigma=predModel$sigma, nu=predModel$nu)
-#   }
-#   return(centiles)
-# }
+
+##
+# Estimate the centile closest to each phenotype value in a list
+# @param model A GAMLSS model
+# @param measuredPhenotypeValue A list of phenotype values
+# @param logAge A list of log(post conception age in days, base=10)
+# @param sex A list of the sex of each subject where each value is a factor
+# @param surfaceHoles A list of SurfaceHoles (optional, produced by FreeSurfer)
+calculatePhenotypeCentile_ABCD <- function(model, measuredPhenotypeValue, logAge, sex, df, surfaceHoles=c()){
+  centiles <- c()
+  
+  for (i in 1:length(measuredPhenotypeValue)){
+    if (length(surfaceHoles) == 0) {
+      newData <- data.frame(logAge=logAge[[i]],
+                            sex=sex[[i]])
+    } else {
+      newData <- data.frame(logAge=logAge[[i]],
+                            SurfaceHoles=surfaceHoles[[i]],
+                            sex=sex[[i]])
+    }
+    predModel <- predictAll(model, newdata=newData, type="response", data = df)
+    centiles[i] <- pGG(measuredPhenotypeValue[[i]], mu=predModel$mu, sigma=predModel$sigma, nu=predModel$nu)
+  }
+  return(centiles)
+}
 
 #-------------------------------------------------------------------------------
 # FUNCTION DEFINITIONS: needed for SLIP analysis

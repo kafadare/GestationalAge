@@ -27,7 +27,7 @@
 # library(tidymv) # helps with the gam models
 # source("lib_mpr_analysis.r")
 
-growthchart_model <- function(p, df, covs = c("sex"), agevar = "logAge", formula = "~fp(logAge, npoly=3) + sex - 1", n.cyc = 200, desiredCentiles = c(0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)) {
+growthchart_model <- function(p, df, covs = c("sex"), agevar = "logAge", formula = "~fp(logAge, npoly=3) + sex - 1", n.cyc = 200, desiredCentiles = c(0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95), predictFUN = predictCentilesForAgeRange) {
   df <- df %>% select(all_of(c(p, covs, agevar)))
   df <- df[order(get(agevar, df)),] %>% na.omit(.) %>% rename(logAge = agevar)
   #The df should have no NAs. So create df for the specific variables needed. Or remove all the variables with NAs.
@@ -44,35 +44,10 @@ growthchart_model <- function(p, df, covs = c("sex"), agevar = "logAge", formula
   centileCurvesSs <- c() 
   desiredCentiles <- desiredCentiles
   for (i in c(1:length(desiredCentiles))){
-    centileCurvesSs[[i]] <- predictCentilesForAgeRange(growthChartModel, ageRange = df$logAge, df = df,
-                                                       cent=desiredCentiles[[i]])}
+    centileCurvesSs[[i]] <- do.call(predictFUN, list(gamModel = growthChartModel, ageRange = df$logAge, df = df,
+                                                       cent=desiredCentiles[[i]]))}
   out <- list(model = NULL, centileCurves = NULL)
   out$model <- growthChartModel
   out$centileCurves <- centileCurvesSs %>% set_names(desiredCentiles)
-  return(out)
-}
-
-growthchart_modelGA <- function(p, df, covs = c("sex"), agevar = "logAge", formula = "~fp(logAge, npoly=3) + sex - 1", n.cyc = 200, desiredCentiles = c(0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)) {
-  df <- df %>% select(c(p, covs, agevar))
-  df <- df[order(get(agevar, df)),] %>% na.omit(.)%>% rename(logAge = agevar)
-  #The df should have no NAs. So create df for the specific variables needed. Or remove all the variables with NAs.
-  formulaSs <- as.formula(paste0(p, formula))
-  growthChartModel <-gamlss(formula = formulaSs,
-                            sigma.formula = formulaSs,
-                            nu.formula = as.formula(paste0(p, "~1")),
-                            family = GG,
-                            data = df,
-                            control = gamlss.control(n.cyc = n.cyc),  # See (2)
-                            trace = F)
-  
-  # Predict a set of centiles for the model
-  centileCurvesSs <- c()
-  desiredCentiles <- desiredCentiles
-  for (i in c(1:length(desiredCentiles))){
-    centileCurvesSs[[i]] <- predictCentilesForAgeRange_GAbins(growthChartModel, ageRange = df$logAge, df = df,
-                                                       cent=desiredCentiles[[i]])}
-  out <- list(model = NULL, centileCurves = NULL)
-  out$model <- growthChartModel
-  out$centileCurves <- centileCurvesSs
   return(out)
 }

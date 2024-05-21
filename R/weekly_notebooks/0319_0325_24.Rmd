@@ -1,13 +1,13 @@
 ---
-title: "0313_0318"
+title: "0319_035"
 author: "Eren Kafadar"
-date: "2024-03-13"
+date: "2024-03-19"
 output: html_document
 editor_options: 
   chunk_output_type: inline
 ---
 # Thoughts on this week
-Study as random effect
+Study as random effect -- still working on this, not much progress made last week unfortunately
 - per Margaret could predict based on the most common study, and then regress out the fx of study later. use re() instead of random() to get the study effects extractable.
   - Still don't fully understand how random fx work, should watch some videos + the book chapter
 - Also check if the predict function has built-in functionality to "ignore" the random effects (Lena mentioned it might)
@@ -17,7 +17,7 @@ Once study random fx is sorted (hopefully!)
 
 In slip: repeat GA modeling analysis combining VPM & LPM
 
-For ABCD 
+For ABCD -- First goal is to download all the required files locally (as explained by Lena the aseg files include the MRI data I want).
 - Start with global tissue segmentations
   - linear modeling of the growth (two data points)
   - gamlss modeling of the three data points
@@ -77,10 +77,17 @@ source("~/Documents/Grad_School/BGDLab/GestationalAge/R/scripts/lib_mpr_analysis
 source("~/Documents/Grad_School/BGDLab/GestationalAge/R/scripts/growth_chart_fcts_EK.r")
 source("~/Documents/Grad_School/BGDLab/GestationalAge/R/scripts/figures.r")
 source("~/Documents/Grad_School/BGDLab/GestationalAge/R/scripts/GAmodeling_draft.r")
+source("~/Documents/Grad_School/BGDLab/GestationalAge/R/scripts/centile_functions_ABCD.r")
 
 folders <- c("/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/2024-01-19_release/slip_2022/","/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/2024-01-19_release/slip_2023_02/", "/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/2024-01-19_release/slip_2023_03/")
 manual_qc_file <- "/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/manual_qc_grades_radiology_paper.csv"
 lbcc_ga_file <- "~/Documents/Grad_School/BGDLab/LBCC_data/GA.all.data-24-02.csv"
+abcd_vol_aseg_file <- "~/Documents/Grad_School/BGDLab/ABCD_data/mri_y_smr_vol_aseg.csv"
+abcd_demo_file <- "~/Documents/Grad_School/BGDLab/ABCD_data/abcd_p_demo.csv"
+abcd_medhx_file <- "~/Documents/Grad_School/BGDLab/ABCD_data/ph_p_dhx.csv"
+abcd_mri_adm_file <- "~/Documents/Grad_School/BGDLab/ABCD_data/mri_y_adm_info.csv"
+abcd_ltrack_file <- "~/Documents/Grad_School/BGDLab/ABCD_data/abcd_y_lt.csv"
+abcd_screen_file <- "~/Documents/Grad_School/BGDLab/ABCD_data/abcd_p_screen.csv"
 ```
 
 # Play - SLIP
@@ -475,7 +482,7 @@ ggplot(df,(aes(x = logAge, y = total_GM, color = GAbins_recode))) + geom_point(a
 gc_allGA <- lapply(vars, function(x) {growthchart_modelGA(p = x, df = df, covs = c("sex", "GAbins_recode"), formula = "~fp(logAge, npoly=3) + sex + GAbins_recode - 1")}) %>% set_names(vars)
 ```
 
-###Models v2 - yes study fx, no interaction, no fetal
+###Models v2 - yes study fx, no interaction, no fetal; global tissue-level phenotypes
 Age at peaks calculation needs to be adjusted for the new output of the centileCurves!
 Regular Model
 ```{r}
@@ -492,11 +499,12 @@ gc_all<- lapply(vars, function(x) {growthchart_model(p = x, df = df, covs = c("s
 test_me <- function(){
 growthchart_model(p = "total_GM", df = df, covs = c("sex", "study_recode"), formula = "~fp(logAge, npoly=3) + sex + random(study_recode) - 1")}
 
+test_me_GA <- function(){
+growthchart_model(p = "total_GM", df = df, covs = c("sex","GAbins_recode", "study_recode"), formula = "~fp(logAge, npoly=3) + sex + GAbins_recode + re(study_recode) - 1", predictFUN = predictCentilesForAgeRange_GAbins)}
 
 test_me()
 
-growthchart_model(p = "total_GM", df = df, covs = c("sex", "study_recode"), formula = "~fp(logAge, npoly=3) + sex + random(study_recode) - 1")
-
+test_meGA
 #%>% set_names(vars)
 
 # Calculate the age at peak (median) phenotype value
@@ -581,4 +589,217 @@ plot(df$logAge, df$total_WM, ylab = "total WM", xlab = "logAge", main = "Total W
 
 growthChart_plot(p = "total_GM", df = df, centileCurves = gc_all[[1]]$centileCurves, title = "", by.sex = F)
 plots[[3]]
+```
+
+#Play - ABCD
+##Load Data
+
+###loading raw data & cleanup
+pivot wider time points
+match up & merge data tables based on matching subject ID & eventname
+lbcc_abcd N=10574
+abcd_wide N=11868
+participants overlap N=10574
+add gestational age column from lbcc dataframe Lena sent
+devhx_12a_p -- was the child born prematurely? 1 - Yes, 0 - No, 999 - Don't know
+devhx_ss_12_p -- how many weeks premature when born? (counting back from 40wks) (corrected), 999 - Don't know
+devhx_12_p -- above but not corrected, so there are no '0's
+TRY
+- remove screener from the first loading list, and then merge and add screener again at the end (re-merge) -- DID NOT WORK
+- remove other extra ones and try again ....
+```{r}
+abcd_data <- load_data(names = c("abcd_vol_aseg", "abcd_demo", "abcd_medhx", "abcd_mri_adm", "abcd_longtrack"), c(abcd_vol_aseg_file, abcd_demo_file, abcd_medhx_file, abcd_mri_adm_file, abcd_ltrack_file))
+abcd_long <- Reduce(function(x, y) merge(x, y, by = c("src_subject_id", "eventname"), all=TRUE), abcd_data, accumulate=FALSE)
+abcd_screener <- read.csv(abcd_screen_file) %>% select(-eventname) #drop "eventname" column because the variables in the screener are one-time values (not longitudinally changing)
+abcd_long <- merge(abcd_long, abcd_screener, by = "src_subject_id", all = TRUE)
+
+#calculate total mri phenotypes
+abcd_long$totalWM_cb <- abcd_long$smri_vol_scs_cbwmatterlh + abcd_long$smri_vol_scs_cbwmatterrh
+abcd_long$totalWM_crb <- abcd_long$smri_vol_scs_crbwmatterlh + abcd_long$smri_vol_scs_crbwmatterrh
+abcd_long$totalCTX_crb <- abcd_long$smri_vol_scs_crbcortexlh + abcd_long$smri_vol_scs_crbcortexrh
+
+#convert all events to "months" baseline = 0
+abcd_long$year <- NA
+abcd_long$year <- gsub("_year_follow_up_y_arm_1$", "", abcd_long$eventname)
+abcd_long[abcd_long$year %in% c("baseline_year_1_arm_1"),"year"] <- 0
+abcd_long$month <- NA
+abcd_long$month <- as.numeric(abcd_long$year) * 12
+abcd_long[is.na(abcd_long$month),]$month <-  as.numeric(abcd_long[is.na(abcd_long$month),]$eventname %>% gsub("_month_follow_up_arm_1$", "", .))
+
+#Get GA from the dhx survey, compare baseline & 4yr f/up reporting (if duplicated). Then use baseline reporting.
+baseline_dev <- abcd_data$abcd_medhx[abcd_data$abcd_medhx$eventname == "baseline_year_1_arm_1",]
+fouryear_dev <- abcd_data$abcd_medhx[abcd_data$abcd_medhx$eventname == "4_year_follow_up_y_arm_1",]
+table(baseline_dev$devhx_12a_p)
+table(fouryear_dev$devhx_12a_p)#only 30 responses, 3 "yes"
+ids <- fouryear_dev[!is.na(fouryear_dev$devhx_12a_p), c("src_subject_id","devhx_12a_p", "devhx_12_p")] 
+ids_base <-baseline_dev[which(baseline_dev$src_subject_id %in% ids$src_subject_id),  c("src_subject_id","devhx_12a_p", "devhx_12_p")]
+## one subject reported "premature" in 4year f/up, but not at baseline (NDAR_INVL7KKBD44). one subject reported "premature" in baseline but not at 4year f/up (NDAR_INVEJHM574R). Both cases reported prematurity by 1 week (would correspond to 39 weeks GA). I will use the baseline reported value.
+## In new column gestAge, reporting "don't know" to "premature or no" is encoded as NA (140) + 2 subjects had NA for this question. Total NA in gestAge is 142 reporting "don't know" to "how premature" is encoded as 0.
+baseline_dev$gestAge <- ifelse(baseline_dev$devhx_12a_p %in% "0", 40, ifelse(baseline_dev$devhx_12a_p %in% "999", NA, ifelse(baseline_dev$devhx_12_p %in% "999", 0, 40 - baseline_dev$devhx_12_p)))
+##Three subject IDs that do not have any data associated with them other than mri data(at baseline) and screener data. No demographics etc. Keep/Remove?
+abcd_long <- merge(abcd_long, baseline_dev[,c("src_subject_id", "gestAge")], by = "src_subject_id", all = TRUE) #total 145 IDs w/o gestAge data. 3 of them as mentioned above do not have medhx data at all.
+
+sum(is.na(abcd_long$gestAge)) # 1040 total NAs
+
+dup_indices <- duplicated(abcd_long[, c("src_subject_id", "eventname")]) | duplicated(abcd_long[, c("src_subject_id", "eventname")], fromLast = TRUE)
+sum(dup_indices) #0 duplicates - what we want.
+rm(dup_indices)
+
+# #get GA from the lbcc data table
+# lbcc_abcd <- read.csv("/Users/ekafadar/Documents/Grad_School/BGDLab/SLIP_data/lbcc_slip_GA_combo.csv") %>% filter(study == "ABCD") 
+# lbcc_abcd$participant <- gsub("sub-", "", lbcc_abcd$participant) %>% gsub("NDAR", "NDAR_", .)
+# abcd_long <- merge(abcd_long, lbcc_abcd[,c("participant", "PCW_at_birth_recoded")], by.x = "src_subject_id", by.y = "participant", all.x = TRUE)
+#convert age at interview to weeks (x4.3), and add the GA at birth in weeks
+
+abcd_long$PCW_at_event <- as.numeric(abcd_long$interview_age)*4.34 + abcd_long$gestAge
+sum(is.na(abcd_long$PCW_at_event)) #1048 NAs, 1040 gestAge NAs + 8 interview_age NAs
+df <- abcd_long %>% filter(!is.na(demo_sex_v2))
+df$sex <- as.factor(ifelse(df$demo_sex_v2 %in% "1", "M", ifelse(df$demo_sex_v2 %in% "2", "F", ifelse(df$demo_sex_v2 %in% "3", "I", NA))))
+abcd_long <- merge(abcd_long, df[,c("src_subject_id", "sex")], by = "src_subject_id", all = TRUE) 
+rm(df)
+#convert to wide
+scrn_names <- names(abcd_screener[,2:81])
+values_cols <- setdiff(names(abcd_long), c("eventname", "src_subject_id", "gestAge", "sex", scrn_names))
+abcd_wide <- abcd_long %>% pivot_wider(., names_from = "eventname", values_from = all_of(values_cols))
+
+#define preterm categories
+abcd_long$preterm <- as.factor(cut(abcd_long$gestAge, breaks = c(-Inf, 31.9, 36.9, Inf), labels = c("VPM", "LPM", "Term"), include.lowest = TRUE))
+abcd_wide$preterm <- as.factor(cut(abcd_wide$gestAge, breaks = c(-Inf, 31.9, 36.9, Inf), labels = c("VPM", "LPM", "Term"), include.lowest = TRUE))
+
+write.csv(abcd_wide, file = "/Users/ekafadar/Documents/Grad_School/BGDLab/ABCD_data/abcd_combined_wide_032524.csv", quote = F, row.names = F)
+write.csv(abcd_long, file = "/Users/ekafadar/Documents/Grad_School/BGDLab/ABCD_data/abcd_combined_long_032524.csv", quote = F, row.names = F)
+
+rm(abcd_data, abcd_screener, baseline_dev, fouryear_dev, ids, ids_base, scrn_names, values_cols)
+```
+###Look at data distribution
+get global data
+-total ventricles volume - smri_vol_scs_allventricles
+-total white matter (cortex or also cerebellar?)
+-total gray matter
+-subC gray matter volume: smri_vol_scs_subcorticalgv
+
+?? --- wm hypointensities: smri_vol_scs_wmhint
+
+-- get GA at birth from the big LBCC table, see if there are any missing.
+```{r}
+abcd_wide <- read.csv("/Users/ekafadar/Documents/Grad_School/BGDLab/ABCD_data/abcd_combined_wide_032524.csv")
+abcd_long <- read.csv("/Users/ekafadar/Documents/Grad_School/BGDLab/ABCD_data/abcd_combined_long_032524.csv")#48928
+```
+look at distribution of variables
+```{r}
+#look at distribution of gestational ages
+sum(!is.na(abcd_wide$gestAge))#10414
+hist(abcd_wide$gestAge)
+table(abcd_wide$gestAge)
+table(abcd_wide$preterm)
+table(abcd_wide$sex)
+
+#MRI phenotypes how many subjects with longitudinal data?
+sum(!is.na(abcd_wide$smri_vol_scs_intracranialv_baseline_year_1_arm_1)) #11728 for baseline
+sum(!is.na(abcd_wide$smri_vol_scs_intracranialv_baseline_year_1_arm_1) & !is.na(abcd_wide$smri_vol_scs_intracranialv_2_year_follow_up_y_arm_1))#8024
+sum(!is.na(abcd_wide$smri_vol_scs_intracranialv_baseline_year_1_arm_1) & !is.na(abcd_wide$smri_vol_scs_intracranialv_2_year_follow_up_y_arm_1)& !is.na(abcd_wide$smri_vol_scs_intracranialv_4_year_follow_up_y_arm_1))#2631
+#Preterm category distribution per available data
+table(abcd_wide[!is.na(abcd_wide$smri_vol_scs_intracranialv_baseline_year_1_arm_1), "preterm"])# VPM  LPM Term  175 1425 9985 
+table(abcd_wide[!is.na(abcd_wide$smri_vol_scs_intracranialv_baseline_year_1_arm_1) & !is.na(abcd_wide$smri_vol_scs_intracranialv_2_year_follow_up_y_arm_1),"preterm"])# VPM  LPM Term 115  995 6833 
+table(abcd_wide[!is.na(abcd_wide$smri_vol_scs_intracranialv_baseline_year_1_arm_1) & !is.na(abcd_wide$smri_vol_scs_intracranialv_2_year_follow_up_y_arm_1)& !is.na(abcd_wide$smri_vol_scs_intracranialv_4_year_follow_up_y_arm_1),"preterm"])# VPM  LPM Term 42  315 2252 
+
+#plot mri phenotypes longitudinally, grouped by gestational age.
+vars_to_plot <- exprs(smri_vol_scs_intracranialv, smri_vol_scs_wholeb, totalWM_cb, smri_vol_scs_allventricles, smri_vol_scs_subcorticalgv, totalWM_crb, totalCTX_crb)
+#Want them to be by age (where is the age column?), and colored by preterm status
+# plots <- lapply(vars_to_plot, function(var) {
+#   group_smooth(abcd_long, preterm, !!var, PCW_at_event)
+# })
+# the data points being plotted obscured the "smoothed" line
+plots <- lapply(vars_to_plot, function(var) {
+  group_smooth_onlyLine(abcd_long, preterm, !!var, PCW_at_event)
+})
+plots[1]
+plots[2]
+plots[3]
+plots[4]
+plots[5]
+plots[6]
+plots[7]
+
+df <- abcd_long %>% filter(gestAge == "40" & sex %in% c("M", "F") & !is.na(smri_vol_scs_intracranialv)) %>% mutate(logAge = log10(PCW_at_event)) %>% group_by(src_subject_id)
+three_fup_subIDs <- df[which(df$eventname == "4_year_follow_up_y_arm_1"), "src_subject_id"]
+#look at how data looks longitudinally
+plots <- lapply(vars_to_plot, function(var) {
+  group_smooth(head(df[which(df$src_subject_id %in% three_fup_subIDs$src_subject_id),],15), src_subject_id, !!var, PCW_at_event)
+})
+plots[1]
+plots[2]
+plots[3]
+plots[4]
+plots[5]
+plots[6]
+plots[7]
+
+vars <- c
+# Assume plots is a list of ggplot plots -- difficult to see in grid
+grid.arrange(grobs = plots[1:4], ncol = 2)
+grid.arrange(grobs = plots[5:7], ncol = 2)
+```
+##Linear models
+```{r}
+vars <- c("smri_vol_scs_intracranialv", "smri_vol_scs_wholeb", "totalWM_cb", "smri_vol_scs_allventricles", "smri_vol_scs_subcorticalgv", "totalWM_crb", "totalCTX_crb")
+df <- abcd_long %>% filter(gestAge == "40" & sex %in% c("M", "F") & !is.na(smri_vol_scs_intracranialv)) %>% mutate(logAge = log10(PCW_at_event))
+
+lm <- nlme(vars[1] ~ 1 + PCW_at_event + sex + site_id_l + (1 | src_subject_id), data = df)
+```
+
+
+##GAMLSS
+###Get a growthchart model of term born (40wks) folks
+? include site effect as random effect ?
+ **Dividing Outcome variable by 10K (the thing Lena said..) for more stable prediction? .. actual operation in Simon's code ...
+too many data points to see the lines clearly. Also x-axis if messed up. Should be fixed.
+Should fix inside the centile from phenotype function to remove rows where there are NAs!!!
+```{r}
+vars <- c("smri_vol_scs_intracranialv", "smri_vol_scs_wholeb", "totalWM_cb", "smri_vol_scs_allventricles", "smri_vol_scs_subcorticalgv", "totalWM_crb", "totalCTX_crb")
+df <- abcd_long %>% filter(gestAge == "40" & sex %in% c("M", "F") & !is.na(smri_vol_scs_intracranialv)) %>% mutate(logAge = log10(PCW_at_event))
+
+##TEST with one variable
+gc_test <- growthchart_model(
+  p = vars[1], 
+  df = df, 
+  predictFUN = predictCentiles_ABCD)
+
+growthChart_plot(
+  p = vars[1], 
+  df = df, 
+  centileCurves = gc_test$centileCurves, 
+  title = "ABCD 40wk")
+##too many data points to see the lines clearly. Also x-axis if messed up. Should be fixed.
+
+
+#Get centile scores from phenotype for all subjects (all preterm categories)
+#get centile values for phenotypes
+centiles_ABCD <- calculatePhenotypeCentile_ABCD(
+  model = gc_test$model, 
+  measuredPhenotypeValue = df$smri_vol_scs_intracranialv, 
+  logAge = df$logAge,
+  sex = df$sex,
+  df = df,
+  surfaceHoles=c())
+
+
+centiles_nonMPR <- lapply(seq_along(vars), function(i) {calculatePhenotypeCentile(gc_MPR[[i]]$model, get(paste0(vars[i],"_FALSE"), wide_data), wide_data$logAge, wide_data$sex, df = wide_data)})
+plots <- lapply(seq_along(vars), function(i){ ggplot() + geom_point(aes(x = centiles_MPR[[i]], y =centiles_nonMPR[[i]])) + labs( x = "MPR", y = "non-MPR", title = paste0("Centile Scores,", vars[i],", n=317")) + theme_minimal()})
+
+# Build the growth chart model
+gc_all <- lapply(vars, 
+                 function(x) {growthchart_model(
+                   p = x, 
+                   df = df)}) %>% set_names(vars)
+
+plots <- lapply(seq_along(vars), function(i){growthChart_plot(p = vars[i], df = df, centileCurves = gc_all[[i]]$centileCurves, title = "")})
+grid.arrange(grobs = plots[1:2], ncol = 2)
+
+#get centile values for phenotypes
+centiles_MPR <- lapply(seq_along(vars), function(i) {calculatePhenotypeCentile(gc_MPR[[i]]$model, get(paste0(vars[i],"_TRUE"), wide_data), wide_data$logAge, wide_data$sex, df = wide_data)})
+centiles_nonMPR <- lapply(seq_along(vars), function(i) {calculatePhenotypeCentile(gc_MPR[[i]]$model, get(paste0(vars[i],"_FALSE"), wide_data), wide_data$logAge, wide_data$sex, df = wide_data)})
+plots <- lapply(seq_along(vars), function(i){ ggplot() + geom_point(aes(x = centiles_MPR[[i]], y =centiles_nonMPR[[i]])) + labs( x = "MPR", y = "non-MPR", title = paste0("Centile Scores,", vars[i],", n=317")) + theme_minimal()})
+
+
 ```
