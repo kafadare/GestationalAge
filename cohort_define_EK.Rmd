@@ -1,0 +1,247 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+There are three tables of procedure orders matched with diagnoses from problem list, encounter dx, procedure dx, matched in pat_id, for subjects who DO HAVE gestational age information.
+Eventually, should look into btw-group differences for subjects with and without GA info populated.
+
+load packages
+```{r}
+require(bigrquery)
+require(tidyverse)
+require(dplyr)
+require(ggplot2)
+require(glue)
+
+source("/mnt/arcus/lab/users/kafadare/data_functions.R")
+```
+
+load phecode inclusion/exclusion tables and ICD-PheCode conversion tables
+```{r}
+#ICD to phecode conversion tables downloaded from https://phewascatalog.org/ on Sep 6 2024
+icd10tophecode <- read.csv('/mnt/arcus/lab/users/kafadare/phecode_icd10.csv')
+icd9tophecode <- read.csv('/mnt/arcus/lab/users/kafadare/phecode_icd9_rolled.csv') 
+
+phecode_defs <- read.csv('/mnt/arcus/lab/users/kafadare/filter-by-dx/dx-filters/excuded_phecodes2.csv')
+phecodes_exclusion <- read.csv('/mnt/arcus/lab/users/kafadare/filter-by-dx/dx-filters/phecodes_with_exclusion_TS_and_AAB_19April2024.csv')
+
+excluded_phecodes <- phecodes_exclusion[which(phecodes_exclusion$exclude_or_include_AAB_TS == 'exclude'),]
+icd10Dx_toexclude <- icd10tophecode[which(icd10tophecode$PheCode %in% excluded_phecodes$phecode),]
+icd9Dx_toexclude <- icd9tophecode[which(icd9tophecode$PheCode %in% excluded_phecodes$phecode),]
+```
+load data tables from arcus. Procedure orders have been through "coarse text search" and selected for patients who have the GA field filled.
+#STARTING WITH PROBLEM LIST
+ -problem list with icd codes joined to procedure orders .. lab.proc_probList_EK
+ -encounter dx with icd codes joined to procedure orders .. lab.proc_encDx_EK
+ -procedure dx with icd codes joined to procedure orders .. lab.proc_procDx_EK
+```{r}
+bq_auth()
+proj_id <- if (exists('proj_id')) proj_id else bq_projects()[1]
+my_query <- 'SELECT * FROM lab.proc_probList_EK'
+results <- bq_project_query(proj_id, my_query)
+probList <- bq_table_download(results, page_size=3500)
+```
+
+Check time difference between start_datetime and proc_ord_datetime in the procedure table. If it is small enough, can just use proc_ord_datetime for all. Otherwise use start_datetime when available (for most it should be).
+Range shows that the difference can be up to a year in either direction (+ and -), even though for most records the difference is a fraction of a day. So I will go ahead and use start datetime when it is available, and proc_ord_datetime when it is not.
+- difference is weird though, because proc ord datetime should not be after the start datetime ?? Especially not a whole year??
+```{r}
+names(probList)
+dim(probList) #1492618,60
+length(unique(probList$pat_id))#45529
+proc_orders <- probList %>% 
+  distinct(proc_ord_id, .keep_all = T) #93444
+
+#time diff between start datetime and proc ord datetime
+sum(is.na(proc_orders$start_datetime))#27144
+sum(is.na(proc_orders$proc_ord_datetime))#0
+
+mean(proc_orders$start_datetime - proc_orders$proc_ord_datetime, na.rm = TRUE)/(60*60*24)#0.03747 days
+hist((as.numeric(proc_orders$start_datetime - proc_orders$proc_ord_datetime))/(60*60*24), breaks = 100) #most of them around 0
+range((as.numeric(proc_orders$start_datetime - proc_orders$proc_ord_datetime))/(60*60*24), na.rm = TRUE)#-360.6292days  353.0000days
+
+probList$procedure_datetime <- probList$start_datetime
+probList[is.na(probList$procedure_datetime),'procedure_datetime'] <- probList[is.na(probList$procedure_datetime), 'proc_ord_datetime']
+sum(is.na(probList$procedure_datetime))#0
+```
+First look at problem list, remove based on date of "problem noted" vs date of procedure.
+ - Merge problem list table with procedure order table based on patient_ID (should check what to do for multiple scans per Patient -- okay that they are duplicate)
+ - Get column for time diff between problem_noted and start_datetime (for procedure)
+ - Here exclusion will be based on scan, not patient. So proc_id not pat_id to get list.
+ - Next do problem_entry vs start_datetime for those WITHOUT problem_noted date.
+```{r}
+sum(is.na(probList$prob_noted_datetime))#18365
+sum(is.na(probList$prob_entry_datetime))#0
+#Calculating the difference between problem date (noted if available, entry if not available) and procedure date (assigned above) and converting from seconds to days.
+probList$dx_mri_deltaT <- (probList$procedure_datetime - probList$prob_noted_datetime)/(60*60*24)
+sum(is.na(probList$dx_mri_deltaT))#18365
+
+hist(as.numeric(probList$dx_mri_deltaT), breaks = 100)
+
+probList[is.na(probList$dx_mri_deltaT),'dx_mri_deltaT'] <- (probList[is.na(probList$dx_mri_deltaT),]$procedure_datetime - probList[is.na(probList$dx_mri_deltaT),]$prob_entry_datetime)/(60*60*24)
+
+sum(is.na(probList$dx_mri_deltaT))#0
+hist(as.numeric(probList$dx_mri_deltaT), breaks = 100)
+```
+
+Match up ICD codes with phecodes.
+
+```{r}
+library(PheWAS)
+probList$ind <- 1:nrow(probList)#create a column for row index to match the phecodes later.
+
+##Splitting the ICD code and unnesting -- there are multiple ICD codes per cell divided by commas.
+
+probList_icd10 <- probList %>%
+    add_column(vocabulary_id = "ICD10CM",
+               code = probList$icd10_list) %>%
+    select(ind, vocabulary_id, code) %>%
+    drop_na() %>%
+    distinct() %>%
+    mutate(code = str_split(code, ', ')) %>%
+    unnest_longer(code)%>%
+    mapCodesToPhecodes() %>%
+    distinct(.keep_all = T)
+
+probList_icd9 <- probList %>%
+    add_column(vocabulary_id = "ICD9CM",
+               code = probList$icd9_list) %>%
+    select(ind, vocabulary_id, code) %>%
+    drop_na() %>%
+    distinct() %>%
+    mutate(code = str_split(code, ', ')) %>%
+    unnest_longer(code)%>%
+    mapCodesToPhecodes() %>%
+    distinct(.keep_all = T)
+
+  probList_icd <- probList_icd10 %>%
+    bind_rows(probList_icd9) %>%
+    distinct(.keep_all = T)
+  
+  rm(probList_icd9)
+  rm(probList_icd10)
+  
+  # Merge phecodes with original dx, remove duplicates
+  probList <- probList %>%
+    merge(probList_icd, by = "ind", all = T) %>%
+    addPhecodeInfo()
+```
+Add column for "exclude T/F" in these tables based on phecode exclusion table (can be iteratively defined).
+##Add the column for "exclusion flag" based on phecode matched above. Then SAVE. 
+load the probList table that has been saved
+```{r}
+probList$exclude_flag_AABTS <- ifelse(probList$phecode %in% excluded_phecodes$phecode, TRUE, FALSE)
+  # Save phecode phenotypes
+#saveRDS(probList, "/mnt/arcus/lab/users/kafadare/problemList_phecodes.rds")
+```
+
+Load saved problem list with phecodes and exclude flag
+Excluded proc_ord_IDs based on dx_mri_deltaT < -30.
+```{r}
+probList <- readRDS("/mnt/arcus/lab/users/kafadare/problemList_phecodes.rds")
+probList$age_at_scan_months <- as.numeric(probList$procedure_datetime - probList$dob)/(60*60*24*30.43)#in months
+
+#exclude patient_scan if they have an exclusion phecode diagnosis within 30 days or before MRI procedure date.
+length(unique(probList$proc_ord_id))#93110
+procedures_excluded <- probList %>% 
+  filter((exclude_flag_AABTS == TRUE & dx_mri_deltaT > -30)) %>%
+  distinct(proc_ord_id) %>% pull(proc_ord_id)#55192
+write.csv(procedures_excluded, "/mnt/arcus/lab/users/kafadare/proc_ord_ids_exclude_problist.csv", quote = FALSE, row.names = FALSE, col.names = FALSE)
+```
+Upload phecodes_excluded to SQL arcus
+```{r}
+procedures_excluded <- read.table("/mnt/arcus/lab/users/kafadare/proc_ord_ids_exclude_problist.txt") %>% 
+  rename(proc_ord_id = V1)
+bq_auth()
+proj_id <- if (exists('proj_id')) proj_id else bq_projects()[1]
+bq_con <- dbConnect(bigrquery::bigquery(), project = proj_id)
+dest_table = bq_table(project = proj_id, dataset = "lab", table = "proc_ord_id_exclude_probList_EK")
+bq_table_upload(
+  x=dest_table, 
+  values= procedures_excluded, 
+  create_disposition='CREATE_IF_NEEDED', 
+  write_disposition='WRITE_APPEND')
+```
+
+Look at distribution of GAB/age before & after exclusion of exclusion phecodes by date dx < date MRI, buffer 30 days.
+```{r}
+GAB_Age_plot <- 
+  probList %>% distinct(proc_ord_id, .keep_all = TRUE) %>%
+  ggplot(., aes(x = age_at_scan_months, y = gestational_age_num)) + geom_bin2d(bins = 100)+
+  scale_fill_viridis_c(option = "viridis", limits=(c(5, 2100)))
+
+#look at distribution plot again
+GAB_Age_excluded_plot <- 
+  probList %>% 
+  filter(!(proc_ord_id %in% procedures_excluded)) %>%
+  distinct(proc_ord_id, .keep_all = TRUE) %>%
+  ggplot(., aes(x = age_at_scan_months, y = gestational_age_num)) + geom_bin2d(bins = 100)+
+  scale_fill_viridis_c(option = "viridis", limits=(c(5, 2100)))
+
+#histograms of gestational age distributions of procedures before and after exclusion
+# probList %>% 
+#   distinct(proc_ord_id, .keep_all = TRUE) %>%
+#   ggplot(., aes(x = as.numeric(gestational_age_num))) + 
+#   geom_histogram(binwidth = 1, fill = "skyblue", color = "grey")
+# 
+# probList %>% 
+#   filter(!(proc_ord_id %in% procedures_excluded)) %>%
+#   distinct(proc_ord_id, .keep_all = TRUE) %>%
+#   ggplot(., aes(x = as.numeric(gestational_age_num))) + 
+#   geom_histogram(binwidth = 1, fill = "skyblue", color = "grey")
+```
+
+First, get additional proc_ord_id exclusions from the other two diagnosis tables.
+Eventually get a chart of most common exclusion diagnoses & GAB
+Then, also get a chart of the "neuropsych dx of interest" in the remaining patient group.
+** Currently not doing the age at first diagnosis thing, but could do it later.
+
+Do the above for encounter dx tables and procedure dx tables as well.
+
+#ENCOUNTER DX
+download in 20 parts to avoid R crashing
+```{r}
+#run this script through lab-tasks with 20 splits.
+source(encDx_inparts.R)
+```
+
+Now repeat for procedure diagnosis table -- I don't expect much to be left at this point but who knows...
+
+
+
+
+
+
+
+#Duplicate check code - but not useful really in this case
+Check duplicates
+Use the find_col_diff function to see which columns differentiate the duplicates.
+*Mostly stuff like dx_id, epic_dx_id, dx_name, age_in_days etc that are creating duplicate rows (different between duplicate rows) .. honestly it is what it is.
+```{r}
+probList$test_col <- paste(probList$pat_id, probList$proc_ord_id, probList$icd10_list, probList$icd9_list, probList$prob_entry_datetime, probList$prob_noted_datetime, sep = "_")
+out <- probList[which(duplicated(probList$test_col) | duplicated(probList$test_col, fromLast = TRUE)),] %>%
+  group_by(pat_id) %>%
+  mutate(col_diff = find_diff_cols(cur_data())) %>%
+  ungroup()
+table(out$col_diff)
+probList <- probList %>% select(-c(test_col))
+
+# # Manually specify batch size (arcus is struggling with the sheer amount of data)
+# batch_size <- 7500
+# max_batch <- ceiling(nrow(probList)/batch_size)
+# 
+# # Run through each batch to check for duplicates
+# for (batch in 1:max_batch) {
+#   gc()
+#   print(glue("Batch {batch}"))
+#   print("----------------")
+#   # Load in data
+#   batch <- probList[((batch-1)*batch_size)+1:(batch)*batch_size]
+#   sum(duplicated(probList))#
+#   test_col <- paste(probList$pat_id, probList$proc_ord_id, probList$icd10_list, probList$icd9_list, probList$prob_entry_datetime, ... =   probList$dx_id, probList$prob_enc_id, sep = "_")
+# length(unique(test_col))/length(test_col)
+# length(unique(test_col))-length(test_col)
+# head(probList[duplicated(test_col),], 20)
+# }
+```
